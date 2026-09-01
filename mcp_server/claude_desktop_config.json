@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "klipio": {
+      "command": "python",
+      "args": [
+        "G:/Klipio EditVideo/Klipio/mcp_server/klipio_mcp_server.py"
+      ],
+      "env": {},
+      "description": "Klipio Video Editor - Professional video editing controlled by AI"
+    }
+  }
+}

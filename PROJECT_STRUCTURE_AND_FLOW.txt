@@ -1,0 +1,352 @@
+KLIPIO CANONICAL PROJECT STRUCTURE AND FLOW
+Project root: G:\Klipio EditVideo\Klipio
+Updated: 2026-08-19
+Package/version: klipio 2.0.7+46
+
+SOURCE SAFETY
+  No active source was deleted during this architecture pass.
+  Full pre-change recovery archive:
+    G:\Klipio EditVideo\Klipio-source-before-architecture-20260819-063127.zip
+
+  lib\main.dart remains the production entry and integrated UI owner.
+  Current main.dart size: 906,782 bytes.
+  Current lib source: 132 real Dart files, approximately 37,305 lines.
+  Empty/fake Dart files: 0.
+
+  The supplied tree was used as a target architecture. Existing Klipio class
+  names, project files, behavior, and platform code were preserved. Production
+  widgets still integrated in main.dart are exposed through stable feature
+  imports and can be extracted one complete widget at a time.
+
+======================================================================
+1. STARTUP AND USER FLOW
+======================================================================
+
+  Klipio.exe
+    -> lib\main.dart main(args)
+    -> optional --automation-job parsing
+    -> lib\app\bootstrap.dart
+    -> initialize C:\Users\<user>\Klipio Drafts
+    -> KlipioApp
+    -> startup splash (automation can bypass it)
+    -> KlipioHomeScreen
+    -> EditorScreen
+    -> Save / Export / CapCut / Automation
+
+  Stable screen boundaries:
+    lib\app\app.dart
+    lib\features\home\presentation\home_page.dart
+    lib\features\editor\presentation\editor_page.dart
+
+======================================================================
+2. ACTIVE CANONICAL LIB STRUCTURE
+======================================================================
+
+lib\
+  main.dart
+    Production entry plus the currently integrated Splash, Home, Settings,
+    Editor, Inspector, tool panels and export presentation.
+
+  app\
+    app.dart
+    bootstrap.dart
+    dependencies.dart
+    router.dart
+
+  core\
+    constants\
+      app_constants.dart
+      editor_constants.dart
+    localization\
+      klipio_localizations.dart
+    routing\
+      app_router.dart
+      route_names.dart
+    theme\
+      app_colors.dart
+      app_spacing.dart
+      app_theme.dart
+      app_typography.dart
+      editor_theme.dart
+    utils\
+      debounce.dart
+      duration_utils.dart
+      file_utils.dart
+      logger.dart
+    widgets\
+      klipio_button.dart
+      klipio_context_menu.dart
+      klipio_dialog.dart
+      klipio_dropdown.dart
+      klipio_icon_button.dart
+      klipio_panel.dart
+      klipio_slider.dart
+      klipio_tooltip.dart
+
+  features\
+    home\
+      data\recent_project_repository.dart
+      domain\project_summary.dart
+      presentation\home_controller.dart
+      presentation\home_page.dart
+
+    projects\
+      data\autosave_service.dart
+      data\backup_service.dart
+      data\project_repository.dart
+      data\project_serializer.dart
+      domain\klipio_project.dart
+      domain\project_metadata.dart
+
+    media\
+      data\media_probe_repository.dart
+      domain\media_asset.dart
+      services\thumbnail_cache_service.dart
+
+    editor\
+      domain\editor_selection.dart
+      domain\editor_panel_header.dart
+      domain\resize_handle.dart
+      application\editor_commands.dart
+      application\editor_controller.dart
+      application\editor_coordinator.dart
+      presentation\editor_page.dart
+      presentation\layout\workspace_panels.dart
+      presentation\toolbar\category_tab_bar.dart
+      presentation\inspector\inspector_panel.dart
+
+    timeline\
+      domain\timeline_models.dart
+      domain\clip_effect.dart
+      domain\clip_keyframe.dart
+      domain\clip_transform.dart
+      domain\clip_transition.dart
+      domain\track_model.dart
+      application\timeline_editor.dart
+      application\timeline_controller.dart
+      application\timeline_selection_controller.dart
+      application\drag_drop_service.dart
+      application\snap_service.dart
+      presentation\dynamic_timeline_view.dart
+      presentation\timeline_playhead.dart
+      presentation\timeline_ruler.dart
+      presentation\timeline_toolbar.dart
+      presentation\clips\clip_widget.dart
+      presentation\headers\track_header.dart
+      rendering\filmstrip_renderer.dart
+      rendering\waveform_painter.dart
+
+    preview\
+      engine\preview_controller.dart
+      engine\preview_controller_io.dart
+      engine\preview_controller_stub.dart
+      engine\multi_track_preview.dart
+      engine\professional_clip_preview.dart
+      source_monitor\source_monitor.dart
+      source_monitor\source_monitor_controller.dart
+      source_monitor\source_transport.dart
+      program_monitor\program_monitor.dart
+      program_monitor\program_monitor_controller.dart
+      program_monitor\program_overlay_stack.dart
+      program_monitor\program_transport.dart
+
+    audio\
+      domain\audio_settings.dart
+      services\waveform_service.dart
+      services\audio_mixer_service.dart
+
+    text\domain\text_overlay.dart
+    captions\domain\caption_cue.dart
+    captions\domain\caption_style.dart
+    captions\services\caption_service_io.dart
+    stickers\domain\sticker_asset.dart
+    effects\domain\video_effect.dart
+    effects\engine\effect_shader_builder.dart
+    transitions\domain\transition.dart
+    filters\domain\filter_preset.dart
+    adjustments\domain\adjustment_settings.dart
+    animations\domain\clip_animation.dart
+    keyframes\domain\keyframe_track.dart
+    keyframes\application\keyframe_interpolator.dart
+    masks\domain\mask_shape.dart
+    speed\domain\speed_curve.dart
+    cutout\services\chroma_key_service.dart
+    ai\services\auto_reframe_service.dart
+    ai\services\scene_detector.dart
+    ai\services\silence_remover.dart
+
+    export\
+      domain\export_models.dart
+      domain\export_job.dart
+      domain\export_result.dart
+      domain\export_settings.dart
+      domain\export_preset.dart
+      application\export_coordinator.dart
+      services\export_service.dart
+      services\export_service_io.dart
+      services\export_service_stub.dart
+      services\multi_track_filter_builder.dart
+
+    settings\data\app_settings.dart
+    updates\update_service.dart
+    updates\services\update_service.dart
+
+  services\
+    automation\automation_job.dart
+    automation\mcp_bridge.dart
+    cache\cache_cleaner_service.dart
+    capcut\capcut_draft_service.dart
+    ffmpeg\ffmpeg_service.dart
+    ffmpeg\ffprobe_service.dart
+    ffmpeg\encoder_probe_service.dart
+    logging\app_logger.dart
+    platform\platform_support.dart
+    platform\platform_support_io.dart
+    platform\platform_support_stub.dart
+    tasks\render_task_queue.dart
+
+  shared\
+    extensions\context_extension.dart
+    extensions\duration_extension.dart
+    extensions\string_extension.dart
+    models\picked_video.dart
+
+======================================================================
+3. PROJECT AND MEDIA FLOW
+======================================================================
+
+  Project storage
+    -> C:\Users\<user>\Klipio Drafts\<project>
+    -> project.klipio.json and project-meta.json
+    -> Resources\Media, Resources\Audio, Resources\Images
+    -> Timelines, Cache\Thumbnails, Cache\Proxies, Backups
+
+  ProjectRepository
+    -> creates safe unique project directories
+    -> reads and atomically writes canonical KlipioProject JSON
+
+  AutosaveService
+    -> defaults to 20 seconds
+    -> prevents overlapping saves
+
+  BackupService
+    -> timestamped recovery JSON
+    -> retains the newest 20 copies by default
+
+  Media import
+    -> file/folder/drop selection
+    -> FFprobe duration and audio detection
+    -> cached cover and filmstrip thumbnails
+    -> real decoded waveform peaks through WaveformService
+
+======================================================================
+4. TIMELINE AND PREVIEW FLOW
+======================================================================
+
+  TimelineModel is the only owner of the active multi-track model:
+    -> dynamic V1/V2/V3..., A1/A2/A3..., T1/T2...
+    -> independent timelineStart, duration and sourceStart
+    -> transforms, opacity, position, scale, rotation and blend mode
+    -> effects, transitions and keyframes
+    -> linked source audio and independently detached audio
+
+  TimelineController
+    -> full edited duration, playhead and zoom
+    -> track creation, split and delete commands
+
+  TimelineSelectionController
+    -> single, Ctrl-toggle, range and marquee selection state
+
+  TimelineEditor
+    -> cross-track moves
+    -> snap to playhead, markers and clip edges
+    -> split, resize, insert and delete
+    -> lock checks and linked-audio synchronization
+    -> effect, transition, transform and keyframe editing
+
+  DynamicTimelineView
+    -> blue committed playhead and separate green skimmer
+    -> click/drag seeking
+    -> filmstrip rendering and real source waveform rendering
+    -> linked audio inside video; detached audio on audio tracks
+    -> caption blocks and text tracks
+    -> visibility, mute, lock and delete controls
+    -> Ctrl/Shift/marquee multi-selection
+
+  Program Monitor
+    -> resolves active clips at the complete timeline playhead
+    -> stacks video layers by z-index
+    -> adds text, captions and watermark overlays
+    -> transport shows current and complete edited duration
+
+======================================================================
+5. EXPORT, CAPCUT, CAPTIONS AND AUTOMATION
+======================================================================
+
+  ExportCoordinator + RenderTaskQueue
+    -> queue single, sequence and multi-track exports
+    -> sequential execution with pause/resume boundary
+
+  MultiTrackFilterBuilder
+    -> trim/setpts/delay each source
+    -> overlay video tracks in z-order
+    -> mix synchronized audio tracks
+
+  AudioMixerService
+    -> atrim, asetpts, volume/mute, fade, adelay and amix
+
+  Caption service
+    -> Faster-Whisper process and transcript cache
+    -> cue timing and ASS generation
+    -> CUDA attempt with CPU fallback
+
+  CapCut service
+    -> CapCut draft JSON and safe media paths
+    -> protected root metadata registration
+
+  Automation
+    -> --automation-job JSON
+    -> localhost MCP bridge
+
+======================================================================
+6. VALIDATION
+======================================================================
+
+  flutter analyze
+    No issues found.
+
+  flutter test
+    All 36 tests passed.
+
+  New architecture tests cover:
+    project/timeline serialization round trip
+    dynamic track creation and playhead clamping
+    additive multi-clip selection
+    synchronized multi-input audio graph generation
+
+  Existing tests still cover:
+    real cached waveform extraction
+    timeline playhead/skimmer/seek/trim/selection UI
+    linked audio, track controls and caption rows
+    multi-track domain operations
+    real Windows FFmpeg renders
+    desktop and phone UI flows
+
+  flutter build windows --release
+    Success: build\windows\x64\runner\Release\Klipio.exe
+
+======================================================================
+7. SAFE CONTINUATION RULE
+======================================================================
+
+  These complete working presentation bodies intentionally remain in main.dart
+  until each one can be extracted without creating duplicate state:
+    Home cards and Settings dialog
+    Desktop/phone workspace shells
+    Media/Text/Caption/Effects left panels
+    Video/Audio/Text/Caption inspector bodies
+    Export dialog and render progress body
+
+  Move one complete widget at a time, switch main.dart to the canonical import,
+  run all tests, and then continue. Do not delete main.dart or create a second
+  editor state owner while extraction is in progress.

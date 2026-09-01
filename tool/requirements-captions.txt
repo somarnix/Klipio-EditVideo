@@ -1,0 +1,2 @@
+# GPU transcription uses CUDA automatically when the NVIDIA runtime is available.
+faster-whisper>=1.1.0,<2

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>KlipioSetup</AssemblyName>
+    <RootNamespace>KlipioSetup</RootNamespace>
+    <Version>2.0.17</Version>
+    <AssemblyVersion>2.0.17.0</AssemblyVersion>
+    <FileVersion>2.0.17.0</FileVersion>
+    <ApplicationIcon>..\..\windows\runner\resources\app_icon.ico</ApplicationIcon>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\payload\KlipioApp-v2.0.17-installer-runtime.zip" LogicalName="KlipioApp.zip" />
+    <EmbeddedResource Include="..\..\assets\branding\KlipioLogo.jpeg" LogicalName="KlipioLogo.jpeg" />
+  </ItemGroup>
+</Project>

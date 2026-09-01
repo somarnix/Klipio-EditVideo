@@ -1,0 +1,16 @@
+# Klipio MCP Server - Python Dependencies
+
+# MCP SDK
+mcp>=1.0.0
+
+# FastMCP - High-level MCP framework
+fastmcp>=0.1.0
+
+# WebSocket client for communicating with Klipio
+websockets>=12.0
+
+# JSON handling (included in Python 3, but explicit for clarity)
+# json - built-in
+
+# Async support (included in Python 3.7+)
+# asyncio - built-in
