@@ -5,6 +5,7 @@ import 'package:video_player/video_player.dart';
 
 import 'preview_controller.dart';
 import 'professional_clip_preview.dart';
+import '../../composition/domain/render_scene.dart';
 import '../../timeline/domain/timeline_models.dart';
 
 class MultiTrackPreview extends StatefulWidget {
@@ -16,6 +17,8 @@ class MultiTrackPreview extends StatefulWidget {
     this.includeBaseTrack = false,
     this.preferredController,
     this.preferredMediaPath,
+    this.previewMediaPaths = const {},
+    this.playbackSpeedsByMediaPath = const {},
     this.selectedClipId,
     this.onClipSelected,
     this.enableTextureEffects = true,
@@ -27,6 +30,8 @@ class MultiTrackPreview extends StatefulWidget {
   final bool includeBaseTrack;
   final VideoPlayerController? preferredController;
   final String? preferredMediaPath;
+  final Map<String, String> previewMediaPaths;
+  final Map<String, double> playbackSpeedsByMediaPath;
   final String? selectedClipId;
   final ValueChanged<String>? onClipSelected;
   final bool enableTextureEffects;
@@ -146,7 +151,7 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
   String _layerSignature(
     List<({TrackModel track, ClipModel clip})> layers,
   ) =>
-      '${layers.map((item) => '${item.clip.id}:${item.clip.timelineStart}:${item.clip.duration}').join('|')}:preferred=${_preferredClipId ?? ''}';
+      '${layers.map((item) => '${item.clip.id}:${item.clip.timelineStart}:${item.clip.duration}:${widget.previewMediaPaths[item.clip.mediaPath] ?? item.clip.mediaPath}').join('|')}:preferred=${_preferredClipId ?? ''}';
 
   Future<void> _synchronizeControllers() async {
     if (_synchronizing) {
@@ -176,7 +181,10 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
       var created = false;
       if (controller == null) {
         try {
-          controller = await createPreviewController(layer.clip.mediaPath);
+          controller = await createPreviewController(
+            widget.previewMediaPaths[layer.clip.mediaPath] ??
+                layer.clip.mediaPath,
+          );
           await controller.setVolume(0);
           if (!mounted ||
               !_activeLayers.any((item) => item.clip.id == layer.clip.id)) {
@@ -198,8 +206,11 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
         }
       }
       final sourceSeconds = layer.clip.sourceStart +
-          widget.playheadSeconds -
-          layer.clip.timelineStart;
+          (widget.playheadSeconds - layer.clip.timelineStart) *
+              (widget.playbackSpeedsByMediaPath[layer.clip.mediaPath] ?? 1);
+      final playbackSpeed =
+          widget.playbackSpeedsByMediaPath[layer.clip.mediaPath] ?? 1;
+      await controller.setPlaybackSpeed(playbackSpeed.clamp(0.25, 4));
       final current = controller.value.position.inMilliseconds / 1000;
       if (!widget.isPlaying || (current - sourceSeconds).abs() > 0.2) {
         await controller.seekTo(
@@ -267,15 +278,18 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
     VideoPlayerController controller, {
     required bool textureReady,
   }) {
-    final transform =
-        clip.transformAt(widget.playheadSeconds - clip.timelineStart);
     final selected = widget.selectedClipId == clip.id;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final width = constraints.maxWidth * transform.scaleX;
-        final height = constraints.maxHeight * transform.scaleY;
-        final left = transform.positionX * constraints.maxWidth - width / 2;
-        final top = transform.positionY * constraints.maxHeight - height / 2;
+        final node = RenderSceneResolver.resolveClip(
+          clip: clip,
+          composition: CompositionModel(
+            width: constraints.maxWidth.round(),
+            height: constraints.maxHeight.round(),
+            frameRate: 30,
+          ),
+          timelineSeconds: widget.playheadSeconds,
+        );
         Widget video = VideoPlayer(controller);
         if (widget.enableTextureEffects &&
             (clip.effects.any((effect) => effect.enabled) ||
@@ -287,19 +301,19 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
           );
         }
         Widget visual = video;
-        if (!textureReady || transform.opacity < 0.999) {
+        if (!textureReady || node.opacity < 0.999) {
           visual = Opacity(
-            opacity: textureReady ? transform.opacity.clamp(0, 1) : 0,
+            opacity: textureReady ? node.opacity.clamp(0, 1) : 0,
             child: visual,
           );
         }
         return Positioned(
-          left: left,
-          top: top,
-          width: width,
-          height: height,
+          left: node.left,
+          top: node.top,
+          width: node.boxWidth,
+          height: node.boxHeight,
           child: Transform.rotate(
-            angle: transform.rotationDegrees * 0.017453292519943295,
+            angle: node.rotationDegrees * 0.017453292519943295,
             child: GestureDetector(
               onTap: () => widget.onClipSelected?.call(clip.id),
               child: DecoratedBox(

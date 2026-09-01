@@ -18,6 +18,7 @@ import 'app/bootstrap.dart';
 import 'core/storage/recovering_shared_preferences.dart';
 import 'core/theme/app_theme.dart';
 import 'features/captions/domain/ass_text.dart';
+import 'features/captions/domain/caption_style.dart';
 import 'features/settings/data/app_settings.dart';
 import 'services/capcut/capcut_draft_service.dart';
 import 'services/automation/automation_job.dart';
@@ -33,6 +34,7 @@ import 'features/preview/engine/multi_track_preview.dart';
 import 'features/preview/engine/program_timeline_mapper.dart';
 import 'services/automation/mcp_bridge.dart';
 import 'services/process/windows_process_job.dart';
+import 'services/tasks/media_job_manager.dart';
 import 'features/preview/engine/professional_clip_preview.dart';
 import 'features/timeline/application/timeline_editor.dart';
 import 'features/timeline/domain/timeline_models.dart';
@@ -3363,6 +3365,12 @@ class PickedVideo {
     this.timelineThumbnailPaths = const [],
     this.durationSeconds,
     this.hasAudio = true,
+    this.width = 0,
+    this.height = 0,
+    this.frameRate = 0,
+    this.videoCodec = 'unknown',
+    this.bitrate = 0,
+    this.proxyPath,
   });
 
   final String name;
@@ -3371,6 +3379,12 @@ class PickedVideo {
   final List<String> timelineThumbnailPaths;
   final double? durationSeconds;
   final bool hasAudio;
+  final int width;
+  final int height;
+  final double frameRate;
+  final String videoCodec;
+  final int bitrate;
+  final String? proxyPath;
 
   PickedVideo copyWith({
     String? name,
@@ -3379,6 +3393,12 @@ class PickedVideo {
     List<String>? timelineThumbnailPaths,
     double? durationSeconds,
     bool? hasAudio,
+    int? width,
+    int? height,
+    double? frameRate,
+    String? videoCodec,
+    int? bitrate,
+    String? proxyPath,
   }) {
     return PickedVideo(
       name: name ?? this.name,
@@ -3388,6 +3408,12 @@ class PickedVideo {
           timelineThumbnailPaths ?? this.timelineThumbnailPaths,
       durationSeconds: durationSeconds ?? this.durationSeconds,
       hasAudio: hasAudio ?? this.hasAudio,
+      width: width ?? this.width,
+      height: height ?? this.height,
+      frameRate: frameRate ?? this.frameRate,
+      videoCodec: videoCodec ?? this.videoCodec,
+      bitrate: bitrate ?? this.bitrate,
+      proxyPath: proxyPath ?? this.proxyPath,
     );
   }
 }
@@ -3530,6 +3556,9 @@ class _EditorScreenState extends State<EditorScreen>
   MCPBridge? _mcpBridge;
   int _mcpBridgeGeneration = 0;
   final Map<String, List<double>> _audioWaveformPeaks = {};
+  final Map<String, double> _audioWaveformPeakRates = {};
+  final Map<String, Future<String?>> _proxyJobsBySource = {};
+  final Set<String> _proxyUnavailableSources = {};
   final TimelineMarqueeController _timelineMarqueeController =
       TimelineMarqueeController();
   ({ClipModel clip, TrackType type})? _timelineClipboard;
@@ -3578,6 +3607,7 @@ class _EditorScreenState extends State<EditorScreen>
   Timer? _autosaveTimer;
   Timer? _workspaceMemorySaveTimer;
   Timer? _timelineSeekDebounce;
+  Timer? _timelineMediaLoadDebounce;
   final ValueNotifier<double?> _requestedTimelinePlayheadSeconds =
       ValueNotifier(null);
   final ValueNotifier<double?> _liveTimelinePlayheadSeconds = ValueNotifier(0);
@@ -3729,6 +3759,8 @@ class _EditorScreenState extends State<EditorScreen>
   bool _phonePreviewExpanded = true;
   int _controllerLoadGeneration = 0;
   int _filmstripLoadGeneration = 0;
+  bool _timelineMediaLoadRunning = false;
+  bool _timelineMediaLoadAgain = false;
   int _sourceFramePrimeGeneration = 0;
   int _previewFramePrimeGeneration = 0;
 
@@ -3807,6 +3839,11 @@ class _EditorScreenState extends State<EditorScreen>
     WidgetsBinding.instance.addObserver(this);
     _projectArrangeLayers = widget.settings.arrangeLayers;
     _projectFrameRate = widget.settings.defaultFrameRate;
+    _projectProxyEnabled = widget.settings.proxyEnabled;
+    final imageCache = PaintingBinding.instance.imageCache;
+    imageCache.maximumSize = math.min(imageCache.maximumSize, 256);
+    imageCache.maximumSizeBytes =
+        math.min(imageCache.maximumSizeBytes, 128 * 1024 * 1024);
     if (widget.settings.defaultExportFolder.trim().isNotEmpty) {
       _outputFolder = widget.settings.defaultExportFolder.trim();
     }
@@ -4164,6 +4201,7 @@ class _EditorScreenState extends State<EditorScreen>
     _autosaveTimer?.cancel();
     _workspaceMemorySaveTimer?.cancel();
     _timelineSeekDebounce?.cancel();
+    _timelineMediaLoadDebounce?.cancel();
     _requestedTimelinePlayheadSeconds.dispose();
     _liveTimelinePlayheadSeconds.dispose();
     unawaited(_autosaveProject());
@@ -4504,6 +4542,17 @@ class _EditorScreenState extends State<EditorScreen>
           .map((item) => PickedVideo(
                 name: '${item['name'] ?? platform.basename('${item['path']}')}',
                 path: '${item['path'] ?? ''}',
+                durationSeconds:
+                    double.tryParse('${item['durationSeconds'] ?? ''}'),
+                hasAudio: item['hasAudio'] as bool? ?? true,
+                width: int.tryParse('${item['width'] ?? ''}') ?? 0,
+                height: int.tryParse('${item['height'] ?? ''}') ?? 0,
+                frameRate: double.tryParse('${item['frameRate'] ?? ''}') ?? 0,
+                videoCodec: '${item['videoCodec'] ?? 'unknown'}',
+                bitrate: int.tryParse('${item['bitrate'] ?? ''}') ?? 0,
+                proxyPath: '${item['proxyPath'] ?? ''}'.trim().isEmpty
+                    ? null
+                    : '${item['proxyPath']}',
               ))
           .where(
               (video) => video.path.isNotEmpty && File(video.path).existsSync())
@@ -4514,6 +4563,7 @@ class _EditorScreenState extends State<EditorScreen>
           createProjectFile: false,
         );
       } else {
+        _applyProjectSettings(data['projectSettings']);
         _multiTrackTimeline = TimelineModel.empty();
         _selectedTimelineClipId = null;
         _selectedTimelineClipIds.clear();
@@ -5382,6 +5432,13 @@ class _EditorScreenState extends State<EditorScreen>
             'name': video.name,
             'path': video.path,
             'hasAudio': video.hasAudio,
+            'durationSeconds': video.durationSeconds,
+            'width': video.width,
+            'height': video.height,
+            'frameRate': video.frameRate,
+            'videoCodec': video.videoCodec,
+            'bitrate': video.bitrate,
+            'proxyPath': video.proxyPath,
           },
       ],
       'compositions': _compositionPaths,
@@ -6123,6 +6180,11 @@ class _EditorScreenState extends State<EditorScreen>
     if ((nextOffset - _timelineScrollOffset).abs() < 24) return;
     _timelineScrollOffset = nextOffset;
     _timelineScrollOffsetListenable.value = nextOffset;
+    _timelineMediaLoadDebounce?.cancel();
+    _timelineMediaLoadDebounce = Timer(
+      const Duration(milliseconds: 180),
+      () => unawaited(_loadVisibleTimelineMedia()),
+    );
   }
 
   Future<void> _pickVideos() async {
@@ -6191,6 +6253,121 @@ class _EditorScreenState extends State<EditorScreen>
     ]);
   }
 
+  Future<PickedVideo> _enrichVideoMetadata(PickedVideo video) async {
+    final info = await platform.probeMedia(video.path);
+    final savedProxy = video.proxyPath;
+    return video.copyWith(
+      durationSeconds: info.durationSeconds ?? video.durationSeconds,
+      hasAudio: info.hasAudio,
+      width: info.width,
+      height: info.height,
+      frameRate: info.frameRate,
+      videoCodec: info.videoCodec,
+      bitrate: info.bitrate,
+      proxyPath: savedProxy != null && File(savedProxy).existsSync()
+          ? savedProxy
+          : null,
+    );
+  }
+
+  platform.MediaProbeInfo _probeInfoForVideo(PickedVideo video) => (
+        durationSeconds: video.durationSeconds,
+        width: video.width,
+        height: video.height,
+        frameRate: video.frameRate,
+        videoCodec: video.videoCodec,
+        bitrate: video.bitrate,
+        hasAudio: video.hasAudio,
+      );
+
+  bool _shouldUseProxy(PickedVideo video) {
+    final explicitlyEnabled =
+        _projectProxyEnabled || widget.settings.proxyEnabled;
+    final smartEnabled = widget.settings.autoOptimization == 'smart';
+    return explicitlyEnabled ||
+        (smartEnabled && platform.mediaNeedsProxy(_probeInfoForVideo(video)));
+  }
+
+  String? _availablePreviewPath(PickedVideo video) {
+    final proxy = video.proxyPath;
+    if (proxy != null && File(proxy).existsSync()) return proxy;
+    if (_proxyUnavailableSources.contains(video.path)) return video.path;
+    return _shouldUseProxy(video) ? null : video.path;
+  }
+
+  Future<String> _proxyCacheFolder() async {
+    final configured = widget.settings.proxyFolder.trim();
+    if (configured.isNotEmpty) return configured;
+    final cacheConfigured = widget.settings.cacheFolder.trim();
+    final root = cacheConfigured.isNotEmpty
+        ? Directory(cacheConfigured)
+        : Directory(
+            '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}KlipioCache',
+          );
+    return '${root.path}${Platform.pathSeparator}proxies';
+  }
+
+  Future<String?> _ensureProxyForVideo(PickedVideo video) {
+    final existing = video.proxyPath;
+    if (existing != null && File(existing).existsSync()) {
+      return Future<String?>.value(existing);
+    }
+    if (!_shouldUseProxy(video)) return Future<String?>.value(null);
+    final active = _proxyJobsBySource[video.path];
+    if (active != null) return active;
+    late final Future<String?> job;
+    job = () async {
+      final cacheFolder = await _proxyCacheFolder();
+      final proxy = await platform.generateProxyMedia(
+        video.path,
+        cacheFolder,
+        resolution: _projectProxyResolution,
+      );
+      if (proxy == null || !File(proxy).existsSync()) {
+        _proxyUnavailableSources.add(video.path);
+        if (mounted) {
+          final index = _videos.indexWhere((item) => item.path == video.path);
+          final shouldReload = index == _selectedVideoIndex;
+          setState(() {
+            _status =
+                'Proxy unavailable for ${video.name}; using source preview';
+          });
+          if (shouldReload) {
+            await _selectVideo(index, saveCurrentEdit: false);
+          }
+        }
+        return null;
+      }
+      _proxyUnavailableSources.remove(video.path);
+      if (!mounted) return proxy;
+      final index = _videos.indexWhere((item) => item.path == video.path);
+      if (index < 0) return proxy;
+      final shouldReload = index == _selectedVideoIndex;
+      setState(() {
+        _videos[index] = _videos[index].copyWith(proxyPath: proxy);
+        _status = 'Lightweight preview ready for ${video.name}';
+      });
+      unawaited(_autosaveProject());
+      if (shouldReload && mounted) {
+        await _selectVideo(index, saveCurrentEdit: false);
+      }
+      return proxy;
+    }();
+    _proxyJobsBySource[video.path] = job;
+    unawaited(job.whenComplete(() {
+      if (identical(_proxyJobsBySource[video.path], job)) {
+        _proxyJobsBySource.remove(video.path);
+      }
+    }));
+    return job;
+  }
+
+  void _scheduleNeededProxies(Iterable<PickedVideo> videos) {
+    for (final video in videos) {
+      if (_shouldUseProxy(video)) unawaited(_ensureProxyForVideo(video));
+    }
+  }
+
   Future<void> _addProjectMedia(List<PickedVideo> picked) async {
     final composition = _selectedCompositionPath;
     if (composition == null || picked.isEmpty) return;
@@ -6209,18 +6386,7 @@ class _EditorScreenState extends State<EditorScreen>
       final key = item.path.toLowerCase();
       var video = knownByPath[key];
       if (video == null) {
-        final mediaInfo = await Future.wait<Object?>([
-          platform.videoDurationSeconds(item.path),
-          platform.thumbnailForVideo(item.path, thumbnailCache),
-          platform.videoHasAudio(item.path),
-        ]);
-        video = PickedVideo(
-          name: item.name,
-          path: item.path,
-          durationSeconds: mediaInfo[0] as double?,
-          thumbnailPath: mediaInfo[1] as String?,
-          hasAudio: mediaInfo[2] as bool,
-        );
+        video = await _enrichVideoMetadata(item);
         knownByPath[key] = video;
         added.add(video);
       }
@@ -6242,6 +6408,7 @@ class _EditorScreenState extends State<EditorScreen>
     });
     final generation = ++_filmstripLoadGeneration;
     unawaited(_loadTimelineFilmstrips(generation, thumbnailCache));
+    _scheduleNeededProxies(added);
     unawaited(_autosaveProject());
   }
 
@@ -6422,28 +6589,13 @@ class _EditorScreenState extends State<EditorScreen>
     _storeActiveCompositionTimeline();
     final loadGeneration = ++_controllerLoadGeneration;
     final filmstripGeneration = ++_filmstripLoadGeneration;
-    setState(() => _status = 'Reading videos and thumbnails...');
+    setState(() => _status = 'Reading media metadata...');
     final cacheDirectory = await getTemporaryDirectory();
     final thumbnailCache =
         '${cacheDirectory.path}${platform.pathSeparator}klipio_thumbnails';
-    final enriched = <PickedVideo>[];
-    for (final video in picked) {
-      final mediaInfo = await Future.wait<Object?>([
-        platform.videoDurationSeconds(video.path),
-        platform.thumbnailForVideo(video.path, thumbnailCache),
-        platform.videoHasAudio(video.path),
-      ]);
-      enriched.add(
-        PickedVideo(
-          name: video.name,
-          path: video.path,
-          durationSeconds: mediaInfo[0] as double?,
-          thumbnailPath: mediaInfo[1] as String?,
-          hasAudio: mediaInfo[2] as bool,
-          timelineThumbnailPaths: video.timelineThumbnailPaths,
-        ),
-      );
-    }
+    final enriched = await Future.wait<PickedVideo>([
+      for (final video in picked) _enrichVideoMetadata(video),
+    ]);
 
     await _stopMusicPreview();
     final oldSourceController = _sourceController;
@@ -6464,18 +6616,24 @@ class _EditorScreenState extends State<EditorScreen>
     VideoPlayerController? controller;
     String? sourceError;
     String? previewError;
-    try {
-      sourceController = await createPreviewController(enriched.first.path);
-      await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
-    } catch (error) {
-      sourceController = null;
-      sourceError = 'Cannot play source: $error';
-    }
-    try {
-      controller = await createPreviewController(enriched.first.path);
-    } catch (error) {
-      controller = null;
-      previewError = 'Cannot play preview: $error';
+    final initialPreviewPath = _availablePreviewPath(enriched.first);
+    if (initialPreviewPath == null) {
+      sourceError = 'Preparing lightweight preview...';
+      previewError = 'Preparing lightweight preview...';
+    } else {
+      try {
+        sourceController = await createPreviewController(initialPreviewPath);
+        await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
+      } catch (error) {
+        sourceController = null;
+        sourceError = 'Cannot play source: $error';
+      }
+      try {
+        controller = await createPreviewController(initialPreviewPath);
+      } catch (error) {
+        controller = null;
+        previewError = 'Cannot play preview: $error';
+      }
     }
 
     if (!mounted || loadGeneration != _controllerLoadGeneration) {
@@ -6577,6 +6735,7 @@ class _EditorScreenState extends State<EditorScreen>
         thumbnailCache,
       ),
     );
+    _scheduleNeededProxies(enriched);
   }
 
   Future<void> _loadTimelineFilmstrips(
@@ -6586,10 +6745,19 @@ class _EditorScreenState extends State<EditorScreen>
     final cacheDirectory = await getTemporaryDirectory();
     final waveformCache =
         '${cacheDirectory.path}${platform.pathSeparator}klipio_waveforms';
+    final activePaths = <String>{
+      if (_videos.isNotEmpty)
+        _videos[_selectedVideoIndex.clamp(0, _videos.length - 1)].path,
+      for (final track in _multiTrackTimeline.tracks)
+        for (final clip in track.clips) clip.mediaPath,
+    };
     final pendingPaths = [
       for (final video in _videos)
-        if (video.timelineThumbnailPaths.isEmpty ||
-            (video.hasAudio && !_audioWaveformPeaks.containsKey(video.path)))
+        if (activePaths.contains(video.path) &&
+            (video.thumbnailPath == null ||
+                video.timelineThumbnailPaths.isEmpty ||
+                (video.hasAudio &&
+                    !_audioWaveformPeaks.containsKey(video.path))))
           video.path,
     ];
     for (var itemIndex = 0; itemIndex < pendingPaths.length; itemIndex++) {
@@ -6598,7 +6766,11 @@ class _EditorScreenState extends State<EditorScreen>
       final currentIndex = _videos.indexWhere((video) => video.path == path);
       if (currentIndex < 0) continue;
       final video = _videos[currentIndex];
-      final mediaVisuals = await Future.wait<Object>([
+      final mediaVisuals = await Future.wait<Object?>([
+        if (video.thumbnailPath == null)
+          platform.thumbnailForVideo(video.path, thumbnailCache)
+        else
+          Future.value(video.thumbnailPath),
         if (video.timelineThumbnailPaths.isEmpty)
           platform.timelineThumbnailsForVideo(
             video.path,
@@ -6608,21 +6780,29 @@ class _EditorScreenState extends State<EditorScreen>
         else
           Future.value(video.timelineThumbnailPaths),
         if (video.hasAudio)
-          platform.audioWaveformPeaks(video.path, waveformCache)
+          platform.audioWaveformLod(
+            video.path,
+            waveformCache,
+            durationSeconds: video.durationSeconds,
+          )
         else
-          Future.value(const <double>[]),
+          Future.value(
+            const (peaks: <double>[], peaksPerSecond: 20.0),
+          ),
       ]);
-      final frames = mediaVisuals[0] as List<String>;
-      final waveform = mediaVisuals[1] as List<double>;
+      final cover = mediaVisuals[0] as String?;
+      final frames = mediaVisuals[1] as List<String>;
+      final waveform = mediaVisuals[2] as platform.AudioWaveformLod;
       if (!mounted || generation != _filmstripLoadGeneration) return;
       final nextIndex = _videos.indexWhere((item) => item.path == path);
       if (nextIndex < 0) continue;
       setState(() {
         _videos[nextIndex] = _videos[nextIndex].copyWith(
+          thumbnailPath: cover,
           timelineThumbnailPaths: frames,
         );
-        if (waveform.isNotEmpty) {
-          _audioWaveformPeaks[path] = waveform;
+        if (waveform.peaks.isNotEmpty) {
+          _cacheWaveform(path, waveform);
         }
         _status = frames.isEmpty
             ? 'Loading audio waveform for ${video.name}'
@@ -6631,6 +6811,94 @@ class _EditorScreenState extends State<EditorScreen>
     }
     if (mounted && generation == _filmstripLoadGeneration) {
       setState(() => _status = 'Timeline thumbnails and waveforms ready');
+      unawaited(_loadVisibleTimelineMedia());
+    }
+  }
+
+  void _cacheWaveform(String path, platform.AudioWaveformLod waveform) {
+    _audioWaveformPeaks.remove(path);
+    _audioWaveformPeakRates.remove(path);
+    _audioWaveformPeaks[path] = waveform.peaks;
+    _audioWaveformPeakRates[path] = waveform.peaksPerSecond;
+    while (_audioWaveformPeaks.length > 8) {
+      final oldest = _audioWaveformPeaks.keys.first;
+      _audioWaveformPeaks.remove(oldest);
+      _audioWaveformPeakRates.remove(oldest);
+    }
+  }
+
+  Future<void> _loadVisibleTimelineMedia() async {
+    if (!mounted || _videos.isEmpty || _multiTrackTimeline.tracks.isEmpty) {
+      return;
+    }
+    if (_timelineMediaLoadRunning) {
+      _timelineMediaLoadAgain = true;
+      return;
+    }
+    _timelineMediaLoadRunning = true;
+    final generation = _filmstripLoadGeneration;
+    try {
+      final pixelsPerSecond = _timelinePixelsPerSecond();
+      final labelWidth =
+          MediaQuery.sizeOf(context).shortestSide <= 600 ? 124.0 : 132.0;
+      final visibleStart = math.max(
+        0.0,
+        (_timelineScrollOffset - labelWidth) / pixelsPerSecond,
+      );
+      final visibleEnd = visibleStart +
+          math.max(1.0, _timelineViewportWidth) / pixelsPerSecond;
+      final sourceWindows = <String, ({double start, double end})>{};
+      for (final track in _multiTrackTimeline.tracks) {
+        if (track.type != TrackType.video || track.isMuted) continue;
+        for (final clip in track.clips) {
+          final start = math.max(visibleStart, clip.timelineStart);
+          final end = math.min(visibleEnd, clip.timelineEnd);
+          if (end <= start) continue;
+          final sourceStart = clip.sourceStart + start - clip.timelineStart;
+          final sourceEnd = clip.sourceStart + end - clip.timelineStart;
+          final previous = sourceWindows[clip.mediaPath];
+          sourceWindows[clip.mediaPath] = (
+            start: previous == null
+                ? sourceStart
+                : math.min(previous.start, sourceStart),
+            end: previous == null
+                ? sourceEnd
+                : math.max(previous.end, sourceEnd),
+          );
+        }
+      }
+      if (sourceWindows.isEmpty) return;
+      final cacheDirectory = await getTemporaryDirectory();
+      final thumbnailCache =
+          '${cacheDirectory.path}${platform.pathSeparator}klipio_thumbnails';
+      for (final entry in sourceWindows.entries) {
+        if (!mounted || generation != _filmstripLoadGeneration) return;
+        final index = _videos.indexWhere((video) => video.path == entry.key);
+        if (index < 0) continue;
+        final video = _videos[index];
+        final paths = await platform.timelineThumbnailsForVideo(
+          video.path,
+          thumbnailCache,
+          video.durationSeconds,
+          visibleSourceStart: entry.value.start,
+          visibleSourceEnd: entry.value.end,
+        );
+        if (!mounted || generation != _filmstripLoadGeneration) return;
+        final currentIndex =
+            _videos.indexWhere((video) => video.path == entry.key);
+        if (currentIndex < 0 || paths.isEmpty) continue;
+        setState(() {
+          _videos[currentIndex] = _videos[currentIndex].copyWith(
+            timelineThumbnailPaths: paths,
+          );
+        });
+      }
+    } finally {
+      _timelineMediaLoadRunning = false;
+      if (_timelineMediaLoadAgain && mounted) {
+        _timelineMediaLoadAgain = false;
+        unawaited(_loadVisibleTimelineMedia());
+      }
     }
   }
 
@@ -6688,6 +6956,22 @@ class _EditorScreenState extends State<EditorScreen>
 
     ++_controllerLoadGeneration;
     ++_filmstripLoadGeneration;
+    _timelineMediaLoadDebounce?.cancel();
+    final exportToken = _exportCancelToken;
+    final captionToken = _captionCancelToken;
+    try {
+      await Future.wait<void>([
+        if (exportToken != null)
+          exportToken.cancelAndWait(timeout: const Duration(seconds: 8)),
+        if (captionToken != null)
+          captionToken.cancelAndWait(timeout: const Duration(seconds: 8)),
+        platform.cancelBackgroundMediaTasks(),
+      ]);
+    } catch (_) {
+      await terminateAllKlipioWorkers();
+    }
+    _proxyJobsBySource.clear();
+    _proxyUnavailableSources.clear();
     await _stopMusicPreview();
     final source = _sourceController;
     final preview = _previewController;
@@ -6705,6 +6989,8 @@ class _EditorScreenState extends State<EditorScreen>
       _clipTimelineUndoStacks.clear();
       _clipTimelineRedoStacks.clear();
       _captionCuesByVideo.clear();
+      _audioWaveformPeaks.clear();
+      _audioWaveformPeakRates.clear();
       _textOverlays
         ..clear()
         ..add(const _TextOverlayDraft());
@@ -6920,18 +7206,26 @@ class _EditorScreenState extends State<EditorScreen>
     VideoPlayerController? controller;
     String? sourceError;
     String? previewError;
-    try {
-      sourceController = await createPreviewController(_videos[index].path);
-      await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
-    } catch (error) {
-      sourceController = null;
-      sourceError = 'Cannot play source: $error';
-    }
-    try {
-      controller = await createPreviewController(_videos[index].path);
-    } catch (error) {
-      controller = null;
-      previewError = 'Cannot play preview: $error';
+    final selectedVideo = _videos[index];
+    final previewPath = _availablePreviewPath(selectedVideo);
+    if (previewPath == null) {
+      sourceError = 'Preparing lightweight preview...';
+      previewError = 'Preparing lightweight preview...';
+      unawaited(_ensureProxyForVideo(selectedVideo));
+    } else {
+      try {
+        sourceController = await createPreviewController(previewPath);
+        await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
+      } catch (error) {
+        sourceController = null;
+        sourceError = 'Cannot play source: $error';
+      }
+      try {
+        controller = await createPreviewController(previewPath);
+      } catch (error) {
+        controller = null;
+        previewError = 'Cannot play preview: $error';
+      }
     }
     if (!mounted || loadGeneration != _controllerLoadGeneration) {
       await sourceController?.dispose();
@@ -6950,10 +7244,15 @@ class _EditorScreenState extends State<EditorScreen>
     _attachSourceListener(sourceController);
     _attachPreviewListener(controller);
     _scheduleLoadedMonitorFramePrime(sourceController, controller);
+    unawaited(_loadVisibleTimelineMedia());
   }
 
   Future<void> _removeImportedVideo(int index) async {
     if (index < 0 || index >= _videos.length) return;
+    ++_filmstripLoadGeneration;
+    await platform.cancelBackgroundMediaTasks();
+    _proxyJobsBySource.clear();
+    _proxyUnavailableSources.clear();
     final removed = _videos[index];
     final wasActiveComposition = removed.path == _selectedCompositionPath;
     _storeActiveCompositionTimeline();
@@ -6964,6 +7263,7 @@ class _EditorScreenState extends State<EditorScreen>
     _clipTransformOverrides.remove(removed.path);
     _captionCuesByVideo.remove(removed.path);
     _audioWaveformPeaks.remove(removed.path);
+    _audioWaveformPeakRates.remove(removed.path);
     _selectedCaptionIds.removeWhere(
       (id) => _captionSelectionTarget(id)?.path == removed.path,
     );
@@ -7067,6 +7367,7 @@ class _EditorScreenState extends State<EditorScreen>
       _previewFramePrimeGeneration++;
       await controller!.pause();
       await _pauseMusicPreview();
+      MediaJobManager.instance.resumeBackgroundWork();
       if (mounted) setState(() {});
       return;
     }
@@ -7099,6 +7400,7 @@ class _EditorScreenState extends State<EditorScreen>
 
     controller = _previewController;
     if (controller == null || !controller.value.isInitialized) return;
+    MediaJobManager.instance.pauseBackgroundWork();
     _previewFramePrimeGeneration++;
     await controller.setPlaybackSpeed(_speed);
     await controller.setVolume(_previewAudioVolume(_effectiveOriginalVolume));
@@ -8290,6 +8592,7 @@ class _EditorScreenState extends State<EditorScreen>
           _progress = 1;
           _status = 'Ready';
         });
+        MediaJobManager.instance.resumeBackgroundWork();
         _updateExportProgressView(
           details: exportDetails,
           progress: 1,
@@ -8308,6 +8611,7 @@ class _EditorScreenState extends State<EditorScreen>
           _exportCancelToken = null;
           _status = canceled ? 'Export canceled' : 'Ready';
         });
+        MediaJobManager.instance.resumeBackgroundWork();
         _closeExportProgressDialog();
         _showMessage(canceled
             ? 'Export canceled.'
@@ -8396,6 +8700,7 @@ class _EditorScreenState extends State<EditorScreen>
           ? 'Export canceled'
           : 'Ready';
     });
+    MediaJobManager.instance.resumeBackgroundWork();
     _updateExportProgressView(
       details: exportDetails,
       progress: 1,
@@ -8522,6 +8827,7 @@ class _EditorScreenState extends State<EditorScreen>
           ? 'Multi-track export complete'
           : 'Multi-track export failed';
     });
+    MediaJobManager.instance.resumeBackgroundWork();
     _exportCancelToken = null;
     _updateExportProgressView(
       details: exportDetails,
@@ -8744,6 +9050,7 @@ class _EditorScreenState extends State<EditorScreen>
               ? 'Export canceled'
               : 'Ready';
     });
+    MediaJobManager.instance.resumeBackgroundWork();
     _updateExportProgressView(
       details: exportDetails,
       progress: allSucceeded ? 1 : successResults.length / draftGroups.length,
@@ -9656,6 +9963,7 @@ class _EditorScreenState extends State<EditorScreen>
       _progress = 0;
       _status = 'Export failed';
     });
+    MediaJobManager.instance.resumeBackgroundWork();
     _updateExportProgressView(
       details: details,
       progress: 0,
@@ -9686,6 +9994,7 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   Future<void> _pausePlaybackForExport() async {
+    MediaJobManager.instance.pauseBackgroundWork();
     try {
       await _sourceController?.pause();
     } catch (_) {
@@ -9762,6 +10071,7 @@ class _EditorScreenState extends State<EditorScreen>
     }
     if (!mounted) return true;
     setState(() => _status = 'Export canceled');
+    MediaJobManager.instance.resumeBackgroundWork();
     _updateExportProgressView(
       details: _exportProgressView.value.details ??
           _buildExportDialogDetails(_outputFolder ?? '', const []),
@@ -10470,8 +10780,52 @@ class _EditorScreenState extends State<EditorScreen>
         '${frames.toString().padLeft(2, '0')}';
   }
 
+  CaptionStyle get _resolvedCaptionStyle {
+    final preset = _captionPreset(_captionStyle);
+    final background = _captionBackgroundEnabled
+        ? _captionBackgroundColor
+        : preset.backgroundColor;
+    final backgroundOpacity = _captionBackgroundEnabled
+        ? _captionBackgroundOpacity
+        : background.opacity;
+    return CaptionStyle(
+      id: preset.id,
+      name: preset.name,
+      fontFamily: _safeCaptionFont(_captionFont),
+      fontSize: _captionAssFontSize(_captionFontSize),
+      color: _captionColor,
+      highlightColor: preset.accentColor,
+      backgroundColor: background.withOpacity(1),
+      strokeColor: _captionStrokeColor,
+      strokeWidth: _captionStrokeEnabled ? _captionStrokeWidth : 0,
+      bold: _captionBold,
+      italic: _captionItalic,
+      underline: _captionUnderline,
+      opacity: _captionOpacity,
+      shadowColor: _captionShadowColor,
+      shadowBlur: _captionShadowEnabled ? _captionShadowStrength : 0,
+      shadowOffsetX: _captionShadowEnabled ? _captionShadowStrength * 0.7 : 0,
+      shadowOffsetY: _captionShadowEnabled ? _captionShadowStrength * 0.9 : 0,
+      backgroundOpacity: backgroundOpacity,
+      borderRadius: 8,
+      padding: _captionBackgroundEnabled
+          ? _captionBackgroundPadding
+          : backgroundOpacity > 0
+              ? 12
+              : 0,
+      alignment: TextAlign.center,
+      position: const Offset(0.5, 0.78),
+      letterSpacing: _captionCharacterSpacing,
+      wordSpacing: _captionWordSpacing,
+      lineSpacing: _captionLineSpacing,
+      animation: preset.motion,
+      wordsPerLine: _captionWordsPerLine,
+    );
+  }
+
   VideoEditSettings get _settings {
     _saveSelectedTextOverlay();
+    final caption = _resolvedCaptionStyle;
     return VideoEditSettings(
       speed: _speed,
       flip: _flip,
@@ -10528,31 +10882,31 @@ class _EditorScreenState extends State<EditorScreen>
       captionLanguage: _captionLanguage,
       captionDevice: _captionDevice,
       captionStyle: _captionStyle,
-      captionWordsPerLine: _captionWordsPerLine,
-      captionFont: _captionFont,
-      captionFontSize: _captionAssFontSize(_captionFontSize),
-      captionBold: _captionBold,
-      captionUnderline: _captionUnderline,
-      captionItalic: _captionItalic,
+      captionWordsPerLine: caption.wordsPerLine,
+      captionFont: caption.fontFamily,
+      captionFontSize: caption.fontSize,
+      captionBold: caption.bold,
+      captionUnderline: caption.underline,
+      captionItalic: caption.italic,
       captionCase: _captionCase,
-      captionColor: _colorToHex(_captionColor),
-      captionCharacterSpacing: _captionCharacterSpacing,
-      captionWordSpacing: _captionWordSpacing,
-      captionLineSpacing: _captionLineSpacing,
-      captionOpacity: _captionOpacity,
-      captionStrokeEnabled: _captionStrokeEnabled,
-      captionStrokeColor: _colorToHex(_captionStrokeColor),
-      captionStrokeWidth: _captionStrokeWidth,
-      captionBackgroundEnabled: _captionBackgroundEnabled,
-      captionBackgroundColor: _colorToHex(_captionBackgroundColor),
-      captionBackgroundOpacity: _captionBackgroundOpacity,
-      captionBackgroundPadding: _captionBackgroundPadding,
+      captionColor: _colorToHex(caption.color),
+      captionCharacterSpacing: caption.letterSpacing,
+      captionWordSpacing: caption.wordSpacing,
+      captionLineSpacing: caption.lineSpacing,
+      captionOpacity: caption.opacity,
+      captionStrokeEnabled: caption.strokeWidth > 0,
+      captionStrokeColor: _colorToHex(caption.strokeColor),
+      captionStrokeWidth: caption.strokeWidth,
+      captionBackgroundEnabled: caption.backgroundOpacity > 0,
+      captionBackgroundColor: _colorToHex(caption.backgroundColor),
+      captionBackgroundOpacity: caption.backgroundOpacity,
+      captionBackgroundPadding: caption.padding,
       captionGlowEnabled: _captionGlowEnabled,
       captionGlowColor: _colorToHex(_captionGlowColor),
       captionGlowStrength: _captionGlowStrength,
-      captionShadowEnabled: _captionShadowEnabled,
-      captionShadowColor: _colorToHex(_captionShadowColor),
-      captionShadowStrength: _captionShadowStrength,
+      captionShadowEnabled: caption.shadowBlur > 0,
+      captionShadowColor: _colorToHex(caption.shadowColor),
+      captionShadowStrength: caption.shadowBlur,
       captionCurve: _captionCurve,
       hardwareEncoding: widget.settings.hardwareEncoding,
       hardwareDecoding: widget.settings.hardwareDecoding,
@@ -16143,6 +16497,7 @@ class _EditorScreenState extends State<EditorScreen>
               skimmerSeconds: _timelineSkimmerSeconds,
               thumbnailPaths: thumbnailPaths,
               audioWaveformPeaks: _audioWaveformPeaks,
+              waveformPeaksPerSecondByMedia: _audioWaveformPeakRates,
               marqueeController: _timelineMarqueeController,
               onMarqueeSelection: (clipIds, additive) => unawaited(
                 _selectTimelineMarquee(clipIds, additive: additive),
@@ -21296,16 +21651,13 @@ class _EditorScreenState extends State<EditorScreen>
     double scale, {
     bool custom = false,
   }) {
-    final outlineSource = custom
-        ? (_captionStrokeEnabled ? _captionStrokeWidth : 0)
-        : preset.outline;
-    final shadowSource = custom
-        ? (_captionShadowEnabled ? _captionShadowStrength : 0)
-        : preset.shadow;
+    final resolved = _resolvedCaptionStyle;
+    final outlineSource = custom ? resolved.strokeWidth : preset.outline;
+    final shadowSource = custom ? resolved.shadowBlur : preset.shadow;
     final outline = (outlineSource * scale).clamp(0.0, 18.0).toDouble();
     final shadow = (shadowSource * scale).clamp(0.0, 20.0).toDouble();
-    final outlineColor = custom ? _captionStrokeColor : preset.outlineColor;
-    final shadowColor = custom ? _captionShadowColor : preset.outlineColor;
+    final outlineColor = custom ? resolved.strokeColor : preset.outlineColor;
+    final shadowColor = custom ? resolved.shadowColor : preset.outlineColor;
     final shadows = <Shadow>[];
     if (outline > 0) {
       for (final offset in const [
@@ -21332,7 +21684,12 @@ class _EditorScreenState extends State<EditorScreen>
         Shadow(
           color: shadowColor.withOpacity(0.82),
           blurRadius: shadow,
-          offset: Offset(shadow * 0.7, shadow * 0.9),
+          offset: custom
+              ? Offset(
+                  resolved.shadowOffsetX * scale,
+                  resolved.shadowOffsetY * scale,
+                )
+              : Offset(shadow * 0.7, shadow * 0.9),
         ),
       );
     }
@@ -22510,6 +22867,7 @@ class _EditorScreenState extends State<EditorScreen>
       if (identical(_captionCancelToken, cancelToken)) {
         _captionCancelToken = null;
       }
+      MediaJobManager.instance.resumeBackgroundWork();
     }
     if (!mounted) return;
     if (!result.success || cancelToken.isCanceled) {
@@ -24857,6 +25215,17 @@ class _EditorScreenState extends State<EditorScreen>
                             preferredController: controller,
                             preferredMediaPath:
                                 _videos[_selectedVideoIndex].path,
+                            previewMediaPaths: {
+                              for (final video in _videos)
+                                if (video.proxyPath != null &&
+                                    File(video.proxyPath!).existsSync())
+                                  video.path: video.proxyPath!,
+                            },
+                            playbackSpeedsByMediaPath: {
+                              for (final video in _videos)
+                                video.path:
+                                    _clipTimelineEditFor(video.path).speed,
+                            },
                             selectedClipId: _selectedTimelineClipId,
                             enableTextureEffects: !Platform.isWindows,
                             onClipSelected: (clipId) =>
@@ -25133,12 +25502,11 @@ class _EditorScreenState extends State<EditorScreen>
                 previewHeight: previewHeight,
               );
               final preset = _captionPreset(_captionStyle);
+              final style = _resolvedCaptionStyle;
               final currentSeconds = value.position.inMilliseconds / 1000;
-              final captionBackground = _captionBackgroundEnabled
-                  ? _captionBackgroundColor.withOpacity(
-                      _captionBackgroundOpacity,
-                    )
-                  : preset.backgroundColor;
+              final captionBackground = style.backgroundColor.withOpacity(
+                style.backgroundOpacity,
+              );
               final caption = _captionWordFlow(
                 cue: cue,
                 currentSeconds: currentSeconds,
@@ -25165,23 +25533,19 @@ class _EditorScreenState extends State<EditorScreen>
                     decoration: BoxDecoration(
                       color: captionBackground,
                       borderRadius: BorderRadius.circular(
-                        (8 * scale).clamp(2.0, 12.0).toDouble(),
+                        (style.borderRadius * scale)
+                            .clamp(0.0, 24.0)
+                            .toDouble(),
                       ),
                     ),
                     child: Padding(
                       padding: captionBackground == Colors.transparent
                           ? EdgeInsets.zero
                           : EdgeInsets.symmetric(
-                              horizontal: ((_captionBackgroundEnabled
-                                          ? _captionBackgroundPadding
-                                          : 12) *
-                                      scale)
+                              horizontal: (style.padding * scale)
                                   .clamp(2.0, 50.0)
                                   .toDouble(),
-                              vertical: ((_captionBackgroundEnabled
-                                          ? _captionBackgroundPadding * 0.5
-                                          : 6) *
-                                      scale)
+                              vertical: (style.padding * 0.5 * scale)
                                   .clamp(1.0, 30.0)
                                   .toDouble(),
                             ),
@@ -25204,20 +25568,19 @@ class _EditorScreenState extends State<EditorScreen>
     required double fontSize,
     required double scale,
   }) {
+    final resolved = _resolvedCaptionStyle;
     TextStyle style(Color color, {bool active = false}) {
       return TextStyle(
-        color: color.withOpacity(_captionOpacity),
-        fontFamily: _captionFont,
+        color: color.withOpacity(resolved.opacity),
+        fontFamily: resolved.fontFamily,
         fontSize: fontSize,
-        fontWeight: _captionBold ? FontWeight.w900 : FontWeight.w400,
-        fontStyle: _captionItalic ? FontStyle.italic : FontStyle.normal,
+        fontWeight: resolved.bold ? FontWeight.w900 : FontWeight.w400,
+        fontStyle: resolved.italic ? FontStyle.italic : FontStyle.normal,
         decoration:
-            _captionUnderline ? TextDecoration.underline : TextDecoration.none,
+            resolved.underline ? TextDecoration.underline : TextDecoration.none,
         decorationColor: color,
-        letterSpacing: _captionCharacterSpacing * scale,
-        height: (1.05 +
-                _captionLineSpacing /
-                    math.max(5, _captionAssFontSize(_captionFontSize)))
+        letterSpacing: resolved.letterSpacing * scale,
+        height: (1.05 + resolved.lineSpacing / math.max(5, resolved.fontSize))
             .clamp(0.65, 3.0)
             .toDouble(),
         shadows: _captionTextShadows(
@@ -25248,7 +25611,7 @@ class _EditorScreenState extends State<EditorScreen>
         maxLines: 3,
         overflow: TextOverflow.visible,
         textAlign: TextAlign.center,
-        style: style(_captionColor, active: true),
+        style: style(resolved.color, active: true),
       );
     }
 
@@ -25256,7 +25619,7 @@ class _EditorScreenState extends State<EditorScreen>
       alignment: WrapAlignment.center,
       runAlignment: WrapAlignment.center,
       crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: (fontSize * 0.22 + _captionWordSpacing * scale)
+      spacing: (fontSize * 0.22 + resolved.wordSpacing * scale)
           .clamp(2.0, 120.0)
           .toDouble(),
       runSpacing: (fontSize * 0.08).clamp(1.0, 12.0).toDouble(),
@@ -25288,7 +25651,7 @@ class _EditorScreenState extends State<EditorScreen>
                 child: KText(
                   display(word.text),
                   style: style(
-                    active ? _captionColor : preset.inactiveColor,
+                    active ? resolved.color : preset.inactiveColor,
                     active: active,
                   ),
                 ),

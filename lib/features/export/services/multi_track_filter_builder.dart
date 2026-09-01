@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../domain/export_models.dart';
+import '../../composition/domain/render_scene.dart';
 import '../../timeline/domain/timeline_models.dart';
 
 class MultiTrackFilterPlan {
@@ -193,7 +194,7 @@ class MultiTrackFilterBuilder {
       final alphaFilters = needsAlpha
           ? ',format=rgba,colorchannelmixer=aa=${_n(transform.opacity)}'
           : '';
-      final scaleFilter = ',${_foregroundScaleFilter(job, transform)}';
+      final scaleFilter = ',${_foregroundScaleFilter(job, clip)}';
       filters.add(
         '[$foregroundInput]trim=start=0:duration=${_n(sourceDuration)},'
         'setpts=(PTS-STARTPTS)/${_n(speed)},'
@@ -441,7 +442,7 @@ class MultiTrackFilterBuilder {
       final speed = _playbackSpeed(job, clip);
       final sourceDuration = _sourceDuration(job, clip);
       final output = 'seqVideo$index';
-      final foregroundScale = _foregroundScaleFilter(job, transform);
+      final foregroundScale = _foregroundScaleFilter(job, clip);
       final overlayX = 'W*${_n(transform.positionX)}-w/2';
       final overlayY = 'H*${_n(transform.positionY)}-h/2';
       if (transform.canvasMode == 'blur') {
@@ -590,15 +591,25 @@ class MultiTrackFilterBuilder {
 
   String _foregroundScaleFilter(
     MultiTrackExportJob job,
-    ClipTransform transform,
+    ClipModel clip,
   ) {
+    final node = RenderSceneResolver.resolveClip(
+      clip: clip,
+      composition: CompositionModel(
+        width: job.width,
+        height: job.height,
+        frameRate: job.frameRate,
+        backgroundColor: job.backgroundColor,
+      ),
+      timelineSeconds: clip.timelineStart,
+    );
     final width = math.max(
       2,
-      ((job.width * transform.scaleX) / 2).round() * 2,
+      (node.boxWidth / 2).round() * 2,
     );
     final height = math.max(
       2,
-      ((job.height * transform.scaleY) / 2).round() * 2,
+      (node.boxHeight / 2).round() * 2,
     );
     return 'scale=$width:$height:force_original_aspect_ratio=decrease:'
         'force_divisible_by=2:reset_sar=1';
@@ -684,7 +695,7 @@ class MultiTrackFilterBuilder {
           '-preset',
           'ultrafast',
           '-threads',
-          '0',
+          '4',
           '-b:v',
           bitrate,
           '-maxrate',

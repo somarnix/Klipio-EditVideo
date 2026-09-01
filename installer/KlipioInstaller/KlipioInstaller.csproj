@@ -7,9 +7,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>KlipioSetup</AssemblyName>
     <RootNamespace>KlipioSetup</RootNamespace>
-    <Version>2.0.17</Version>
-    <AssemblyVersion>2.0.17.0</AssemblyVersion>
-    <FileVersion>2.0.17.0</FileVersion>
+    <Version>2.0.18</Version>
+    <AssemblyVersion>2.0.18.0</AssemblyVersion>
+    <FileVersion>2.0.18.0</FileVersion>
+    <KlipioPayload Condition="'$(KlipioPayload)' == ''">..\payload\KlipioApp-v2.0.18-installer-runtime.zip</KlipioPayload>
     <ApplicationIcon>..\..\windows\runner\resources\app_icon.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
@@ -19,7 +20,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="..\payload\KlipioApp-v2.0.17-installer-runtime.zip" LogicalName="KlipioApp.zip" />
+    <EmbeddedResource Include="$(KlipioPayload)" LogicalName="KlipioApp.zip" />
     <EmbeddedResource Include="..\..\assets\branding\KlipioLogo.jpeg" LogicalName="KlipioLogo.jpeg" />
   </ItemGroup>
 </Project>

@@ -2074,7 +2074,7 @@ List<String> _videoEncoderArgs(
         '-preset',
         'ultrafast',
         '-threads',
-        '0',
+        '4',
         '-b:v',
         bitrate,
         '-maxrate',

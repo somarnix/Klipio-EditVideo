@@ -33,6 +33,7 @@ migrate_working_dir/
 /installer/KlipioInstaller/bin/
 /installer/KlipioInstaller/obj/
 /installer/dist/
+/release/archive/
 
 # Symbolication related
 app.*.symbols

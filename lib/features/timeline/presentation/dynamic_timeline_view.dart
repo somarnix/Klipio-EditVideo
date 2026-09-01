@@ -106,6 +106,7 @@ class DynamicTimelineView extends StatelessWidget {
     this.thumbnailPaths = const {},
     this.audioWaveformPeaks = const {},
     this.waveformPeaksPerSecond = 50,
+    this.waveformPeaksPerSecondByMedia = const {},
     this.mediaWithSourceAudio = const {},
     this.clipLabels = const {},
     this.trackHeights = const {},
@@ -158,6 +159,7 @@ class DynamicTimelineView extends StatelessWidget {
   final Map<String, List<String>> thumbnailPaths;
   final Map<String, List<double>> audioWaveformPeaks;
   final double waveformPeaksPerSecond;
+  final Map<String, double> waveformPeaksPerSecondByMedia;
   final Set<String> mediaWithSourceAudio;
   final Map<String, String> clipLabels;
   final Map<String, double> trackHeights;
@@ -1311,7 +1313,9 @@ class DynamicTimelineView extends StatelessWidget {
                                 color: Colors.white.withOpacity(0.68),
                                 peaks:
                                     audioWaveformPeaks[musicPath!] ?? const [],
-                                peaksPerSecond: waveformPeaksPerSecond,
+                                peaksPerSecond:
+                                    waveformPeaksPerSecondByMedia[musicPath!] ??
+                                        waveformPeaksPerSecond,
                                 sourceStart: 0,
                                 duration: model.duration,
                                 visibleStartFraction: model.duration <= 0 ||
@@ -1462,7 +1466,9 @@ class DynamicTimelineView extends StatelessWidget {
                       painter: _DynamicWaveformPainter(
                         color: Colors.white.withOpacity(0.65),
                         peaks: audioWaveformPeaks[clip.mediaPath] ?? const [],
-                        peaksPerSecond: waveformPeaksPerSecond,
+                        peaksPerSecond:
+                            waveformPeaksPerSecondByMedia[clip.mediaPath] ??
+                                waveformPeaksPerSecond,
                         sourceStart: clip.sourceStart,
                         duration: clip.duration,
                         visibleStartFraction: visibleFractions.startFraction,
@@ -1488,7 +1494,9 @@ class DynamicTimelineView extends StatelessWidget {
                             color: const Color(0xff67e8f9),
                             peaks:
                                 audioWaveformPeaks[clip.mediaPath] ?? const [],
-                            peaksPerSecond: waveformPeaksPerSecond,
+                            peaksPerSecond:
+                                waveformPeaksPerSecondByMedia[clip.mediaPath] ??
+                                    waveformPeaksPerSecond,
                             sourceStart: clip.sourceStart,
                             duration: clip.duration,
                             visibleStartFraction:

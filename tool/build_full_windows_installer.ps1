@@ -82,7 +82,11 @@ try {
     Compress-Archive -Path $Items.FullName -DestinationPath $PayloadZip -CompressionLevel Optimal
 
     Write-Host "[5/6] Publishing self-contained setup EXE..."
-    dotnet publish $InstallerProject -c Release -r win-x64 --self-contained true -o $InstallerDist
+    dotnet publish $InstallerProject -c Release -r win-x64 --self-contained true -o $InstallerDist `
+        "-p:Version=$Version" `
+        "-p:AssemblyVersion=$Version.0" `
+        "-p:FileVersion=$Version.0" `
+        "-p:KlipioPayload=$PayloadZip"
     if (-not (Test-Path -LiteralPath $SetupExe)) {
         throw 'Installer publish did not create KlipioSetup.exe.'
     }
