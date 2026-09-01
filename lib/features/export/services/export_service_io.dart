@@ -336,6 +336,8 @@ Future<ExportResult> _exportMultiTrackTimeline(MultiTrackExportJob job) async {
         ),
         cancelToken: job.cancelToken,
       ),
+      playResWidth: job.width,
+      playResHeight: job.height,
     );
   }
   if (job.cancelToken?.isCanceled == true) return canceled();

@@ -39,6 +39,50 @@ void main() {
     );
     final contents = await File(path).readAsString();
     expect(contents, contains(r'{\pos(480,378)}MOVE ME'));
+    expect(contents, contains('Shadow,Alignment,MarginL'));
+    expect(contents, contains(',5,30,30,80,1'));
+  });
+
+  test('portrait ASS captions use export resolution and scaled metrics',
+      () async {
+    final path = await generateManualCaptionAss(
+      const ExportJob(
+        inputPath: 'portrait-caption-test.mp4',
+        outputPath: 'unused.mp4',
+        settings: VideoEditSettings(
+          speed: 1,
+          flip: 'none',
+          scaleX: 1,
+          scaleY: 1,
+          zoom: 1,
+          watermarkPath: null,
+          watermarkPosition: 'custom',
+          watermarkSize: 0.12,
+          musicPath: null,
+          originalVolume: 1,
+          musicVolume: 0,
+          captionFontSize: 72,
+          captionStrokeWidth: 6,
+          captionShadowStrength: 3,
+          captionCues: [
+            CaptionCueSettings(
+              start: 0,
+              end: 1,
+              text: 'Portrait center',
+              x: 0.5,
+              y: 0.78,
+            ),
+          ],
+        ),
+      ),
+      playResWidth: 1080,
+      playResHeight: 1440,
+    );
+    final contents = await File(path).readAsString();
+    expect(contents, contains('PlayResX: 1080'));
+    expect(contents, contains('PlayResY: 1440'));
+    expect(contents, contains('Style: Manual,Arial Black,96,'));
+    expect(contents, contains(r'{\pos(540,1123)}PORTRAIT CENTER'));
   });
 
   test('export token pause waits for resume', () async {

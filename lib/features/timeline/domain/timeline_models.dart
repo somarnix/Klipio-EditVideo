@@ -152,6 +152,7 @@ class ClipTransform {
     this.positionX = 0.5,
     this.positionY = 0.5,
     this.rotationDegrees = 0,
+    this.flip = 'none',
     this.blendMode = 'normal',
     this.canvasMode = 'none',
     this.canvasColor = '#F4C70F',
@@ -165,6 +166,7 @@ class ClipTransform {
   final double positionX;
   final double positionY;
   final double rotationDegrees;
+  final String flip;
   final String blendMode;
   final String canvasMode;
   final String canvasColor;
@@ -178,6 +180,7 @@ class ClipTransform {
     double? positionX,
     double? positionY,
     double? rotationDegrees,
+    String? flip,
     String? blendMode,
     String? canvasMode,
     String? canvasColor,
@@ -191,6 +194,7 @@ class ClipTransform {
       positionX: positionX ?? this.positionX,
       positionY: positionY ?? this.positionY,
       rotationDegrees: rotationDegrees ?? this.rotationDegrees,
+      flip: flip ?? this.flip,
       blendMode: blendMode ?? this.blendMode,
       canvasMode: canvasMode ?? this.canvasMode,
       canvasColor: canvasColor ?? this.canvasColor,
@@ -206,6 +210,7 @@ class ClipTransform {
         'positionX': positionX,
         'positionY': positionY,
         'rotationDegrees': rotationDegrees,
+        'flip': flip,
         'blendMode': blendMode,
         'canvasMode': canvasMode,
         'canvasColor': canvasColor,
@@ -222,6 +227,7 @@ class ClipTransform {
     final rawCanvasMode = '${json['canvasMode'] ?? 'none'}'.toLowerCase();
     final rawCanvasPattern = '${json['canvasPattern'] ?? 'grid'}'.toLowerCase();
     final rawCanvasColor = '${json['canvasColor'] ?? '#F4C70F'}'.toUpperCase();
+    final rawFlip = '${json['flip'] ?? 'none'}'.toLowerCase();
     final validCanvasColor = RegExp(r'^#[0-9A-F]{6}$').hasMatch(rawCanvasColor)
         ? rawCanvasColor
         : '#F4C70F';
@@ -232,6 +238,9 @@ class ClipTransform {
       positionX: number('positionX', 0.5).clamp(0, 1).toDouble(),
       positionY: number('positionY', 0.5).clamp(0, 1).toDouble(),
       rotationDegrees: number('rotationDegrees', 0),
+      flip: const {'none', 'left', 'right', 'up', 'down'}.contains(rawFlip)
+          ? rawFlip
+          : 'none',
       blendMode: '${json['blendMode'] ?? 'normal'}',
       canvasMode: canvasModes.contains(rawCanvasMode) ? rawCanvasMode : 'none',
       canvasColor: validCanvasColor,
@@ -343,6 +352,7 @@ class ClipModel {
           right.transform.rotationDegrees,
           t,
         ),
+        flip: t < 0.5 ? left.transform.flip : right.transform.flip,
         blendMode:
             t < 0.5 ? left.transform.blendMode : right.transform.blendMode,
         canvasMode:

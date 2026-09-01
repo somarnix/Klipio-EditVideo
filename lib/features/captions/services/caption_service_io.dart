@@ -212,8 +212,18 @@ Future<String> generateAutomaticCaptionAss(
   return output.path;
 }
 
-Future<String> generateManualCaptionAss(ExportJob job) async {
+Future<String> generateManualCaptionAss(
+  ExportJob job, {
+  int playResWidth = 1920,
+  int playResHeight = 1080,
+}) async {
   final settings = job.settings;
+  final safePlayResWidth = playResWidth.clamp(2, 8192);
+  final safePlayResHeight = playResHeight.clamp(2, 8192);
+  // Caption controls use a 1920x1080 logical design surface. Scale every ASS
+  // metric into the actual export surface so portrait and square renders keep
+  // the same visual size, outline and draggable center position as Preview.
+  final metricScale = safePlayResHeight / 1080.0;
   final cacheDirectory = Directory(
     '${Directory.systemTemp.path}${Platform.pathSeparator}klipio_manual_captions',
   );
@@ -233,6 +243,8 @@ Future<String> generateManualCaptionAss(ExportJob job) async {
     settings.captionBackgroundColor,
     settings.captionBackgroundOpacity,
     settings.captionShadowStrength,
+    safePlayResWidth,
+    safePlayResHeight,
     for (final cue in settings.captionCues) ...[
       cue.start,
       cue.end,
@@ -265,20 +277,25 @@ Future<String> generateManualCaptionAss(ExportJob job) async {
   );
   final borderStyle = settings.captionBackgroundEnabled ? 3 : 1;
   final outlineWidth = settings.captionBackgroundEnabled
-      ? settings.captionBackgroundPadding.clamp(0.0, 60.0)
+      ? settings.captionBackgroundPadding.clamp(0.0, 60.0) * metricScale
       : settings.captionStrokeEnabled
-          ? settings.captionStrokeWidth.clamp(0.0, 30.0)
+          ? settings.captionStrokeWidth.clamp(0.0, 30.0) * metricScale
           : 0.0;
   final shadow = settings.captionShadowEnabled
-      ? settings.captionShadowStrength.clamp(0.0, 30.0)
+      ? settings.captionShadowStrength.clamp(0.0, 30.0) * metricScale
       : 0.0;
   final font = settings.captionFont.replaceAll(',', ' ').trim();
+  final fontSize = (settings.captionFontSize * metricScale).clamp(1.0, 1000.0);
+  final spacing = settings.captionCharacterSpacing * metricScale;
   final style = 'Style: Manual,${font.isEmpty ? 'Arial' : font},'
-      '${settings.captionFontSize.round()},$primary,$primary,$outline,$background,'
+      '${fontSize.round()},$primary,$primary,$outline,$background,'
       '${settings.captionBold ? -1 : 0},${settings.captionItalic ? -1 : 0},'
       '${settings.captionUnderline ? -1 : 0},0,100,100,'
-      '${settings.captionCharacterSpacing.toStringAsFixed(2)},0,$borderStyle,'
-      '${outlineWidth.toStringAsFixed(2)},${shadow.toStringAsFixed(2)},2,30,30,80,1';
+      '${spacing.toStringAsFixed(2)},0,$borderStyle,'
+      // Alignment 5 anchors \\pos at the caption's center. Flutter Preview
+      // also centers the caption widget on cue.x/cue.y; alignment 2 anchored
+      // the exported text by its bottom edge and pushed it visibly too low.
+      '${outlineWidth.toStringAsFixed(2)},${shadow.toStringAsFixed(2)},5,30,30,80,1';
   final events = <String>[];
   for (final cue in settings.captionCues) {
     final sourceStart = cue.start.clamp(trimStart, trimEnd).toDouble();
@@ -300,16 +317,17 @@ Future<String> generateManualCaptionAss(ExportJob job) async {
             return '{\\k$centiseconds}'
                 '${_manualAssText(_manualCaptionText(settings.captionCase, word.text))}';
           }).join(r'\h');
-    final position = '{\\pos(${(cue.x.clamp(0.0, 1.0) * 1920).round()},'
-        '${(cue.y.clamp(0.0, 1.0) * 1080).round()})}';
+    final position =
+        '{\\pos(${(cue.x.clamp(0.0, 1.0) * safePlayResWidth).round()},'
+        '${(cue.y.clamp(0.0, 1.0) * safePlayResHeight).round()})}';
     events.add(
       'Dialogue: 0,${_manualAssTime(start)},${_manualAssTime(end)},Manual,,0,0,0,,$position$renderedText',
     );
   }
   final contents = '[Script Info]\n'
       'ScriptType: v4.00+\n'
-      'PlayResX: 1920\n'
-      'PlayResY: 1080\n'
+      'PlayResX: $safePlayResWidth\n'
+      'PlayResY: $safePlayResHeight\n'
       'WrapStyle: 0\n'
       'ScaledBorderAndShadow: yes\n\n'
       '[V4+ Styles]\n'

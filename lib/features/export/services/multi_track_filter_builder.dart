@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 
 import '../domain/export_models.dart';
-import '../../composition/domain/render_scene.dart';
 import '../../timeline/domain/timeline_models.dart';
 
 class MultiTrackFilterPlan {
@@ -179,6 +178,7 @@ class MultiTrackFilterBuilder {
           ? ''
           : ",rotate='$rotationDegrees*PI/180':ow=rotw(iw):oh=roth(ih):c=black@0";
       final effects = _clipEffectFilters(clip.effects);
+      final flip = _flipFilters(transform.flip);
       final incomingFade = clip.transitionIn == null
           ? ''
           : ',fade=t=in:st=0:d=${_n(clip.transitionIn!.duration)}:alpha=1';
@@ -198,7 +198,7 @@ class MultiTrackFilterBuilder {
       filters.add(
         '[$foregroundInput]trim=start=0:duration=${_n(sourceDuration)},'
         'setpts=(PTS-STARTPTS)/${_n(speed)},'
-        'fps=${_n(job.frameRate)}$effects$rotation'
+        'fps=${_n(job.frameRate)}$flip$effects$rotation'
         '$alphaFilters'
         '$incomingFade$outgoingFade,'
         'setpts=PTS+${_n(clip.timelineStart)}/TB$scaleFilter[$prepared]',
@@ -216,8 +216,11 @@ class MultiTrackFilterBuilder {
       // Program Monitor positions a clip by its center and fits the source
       // inside a canvas-relative transform box. Export must use the same
       // geometry or Scale X/Y crops a different picture than the preview.
-      var x = 'W*($positionX)-w/2';
-      var y = 'H*($positionY)-h/2';
+      // Program Monitor stores position as pan across the free space around
+      // the fitted/scaled source. Using W*position here moves the center
+      // across the entire canvas and produces a different crop on export.
+      var x = '(W-w)/2+(2*($positionX)-1)*abs(W-w)/2';
+      var y = '(H-h)/2+(2*($positionY)-1)*abs(H-h)/2';
       final transition = clip.transitionIn;
       if (transition != null &&
           (transition.type == ClipTransitionType.slideLeft ||
@@ -443,15 +446,16 @@ class MultiTrackFilterBuilder {
       final sourceDuration = _sourceDuration(job, clip);
       final output = 'seqVideo$index';
       final foregroundScale = _foregroundScaleFilter(job, clip);
-      final overlayX = 'W*${_n(transform.positionX)}-w/2';
-      final overlayY = 'H*${_n(transform.positionY)}-h/2';
+      final overlayX = '(W-w)/2+(2*${_n(transform.positionX)}-1)*abs(W-w)/2';
+      final overlayY = '(H-h)/2+(2*${_n(transform.positionY)}-1)*abs(H-h)/2';
+      final flip = _flipFilters(transform.flip);
       if (transform.canvasMode == 'blur') {
         final foreground = 'seqForeground$index';
         final background = 'seqBackground$index';
         filters.add(
           '[$index:v]trim=duration=${_n(sourceDuration)},'
           'setpts=(PTS-STARTPTS)/${_n(speed)},'
-          'fps=${_n(job.frameRate)},trim=duration=${_n(clip.duration)},'
+          'fps=${_n(job.frameRate)}$flip,trim=duration=${_n(clip.duration)},'
           'split=2[$foreground][$background]',
         );
         filters.add(
@@ -477,7 +481,7 @@ class MultiTrackFilterBuilder {
         filters.add(
           '[$index:v]trim=duration=${_n(sourceDuration)},'
           'setpts=(PTS-STARTPTS)/${_n(speed)},'
-          'fps=${_n(job.frameRate)},trim=duration=${_n(clip.duration)},'
+          'fps=${_n(job.frameRate)}$flip,trim=duration=${_n(clip.duration)},'
           '$foregroundScale[seqScaled$index]',
         );
         filters.add(
@@ -593,27 +597,24 @@ class MultiTrackFilterBuilder {
     MultiTrackExportJob job,
     ClipModel clip,
   ) {
-    final node = RenderSceneResolver.resolveClip(
-      clip: clip,
-      composition: CompositionModel(
-        width: job.width,
-        height: job.height,
-        frameRate: job.frameRate,
-        backgroundColor: job.backgroundColor,
-      ),
-      timelineSeconds: clip.timelineStart,
-    );
-    final width = math.max(
-      2,
-      (node.boxWidth / 2).round() * 2,
-    );
-    final height = math.max(
-      2,
-      (node.boxHeight / 2).round() * 2,
-    );
-    return 'scale=$width:$height:force_original_aspect_ratio=decrease:'
-        'force_divisible_by=2:reset_sar=1';
+    final transform = clip.transform;
+    // Match _videoTransformRect in Program Monitor exactly: first contain the
+    // source in the output frame, then apply independent X/Y scaling. Scaling
+    // directly into a composition-relative box loses Scale Y whenever Scale X
+    // becomes the aspect-ratio constraint (and vice versa).
+    return 'scale=${job.width}:${job.height}:'
+        'force_original_aspect_ratio=decrease:force_divisible_by=2:'
+        'reset_sar=1,'
+        'scale=trunc(iw*${_n(transform.scaleX)}/2)*2:'
+        'trunc(ih*${_n(transform.scaleY)}/2)*2:reset_sar=1';
   }
+
+  String _flipFilters(String flip) => switch (flip.toLowerCase()) {
+        'left' || 'right' => ',hflip',
+        'up' => ',hflip,vflip',
+        'down' => ',vflip',
+        _ => '',
+      };
 
   double _playbackSpeed(MultiTrackExportJob job, ClipModel clip) {
     final requested = job.playbackSpeedsByMediaPath[clip.mediaPath] ?? 1;

@@ -615,10 +615,32 @@ Future<List<String>> timelineThumbnailsForVideo(
       maximumBytes: 256 * 1024 * 1024,
     ),
   );
-  // Preserve the complete time grid. Missing files remain lightweight blank
-  // slots until their viewport is requested, so indices always map to the
-  // correct source timestamp.
-  return paths;
+  // Preserve the complete time grid without painting broken/blank image
+  // slots. Until a later viewport request renders a missing timestamp, reuse
+  // its nearest decoded frame. The next request still uses the deterministic
+  // real path above and replaces the placeholder automatically.
+  return _timelineThumbnailGridWithNearestFrames(paths);
+}
+
+List<String> _timelineThumbnailGridWithNearestFrames(List<String> paths) {
+  final available = <int>[
+    for (var index = 0; index < paths.length; index++)
+      if (File(paths[index]).existsSync() && File(paths[index]).lengthSync() > 0)
+        index,
+  ];
+  if (available.isEmpty) return const [];
+  return [
+    for (var index = 0; index < paths.length; index++)
+      if (File(paths[index]).existsSync() && File(paths[index]).lengthSync() > 0)
+        paths[index]
+      else
+        paths[available.reduce(
+          (nearest, candidate) => (candidate - index).abs() <
+                  (nearest - index).abs()
+              ? candidate
+              : nearest,
+        )],
+  ];
 }
 
 Future<void> _writeTimelineThumbnail(

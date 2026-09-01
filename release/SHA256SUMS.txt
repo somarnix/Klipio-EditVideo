@@ -1,1 +1,1 @@
-811cc1faeef692bbd43a4974d8ab0e77298def503d7f00ef5c7963392006e829  Klipio-Windows-Setup.exe
+f2b9ad4ac0766411880f24e5228cc1377fa1ae4fa006799409c641446b12a223  Klipio-Windows-Setup.exe

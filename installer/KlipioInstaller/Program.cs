@@ -9,7 +9,7 @@ namespace KlipioSetup;
 internal static class Program
 {
     private const string AppName = "Klipio";
-    private const string AppVersion = "2.0.19";
+    private const string AppVersion = "2.0.21";
     private const string AppExeName = "Klipio.exe";
 
     [STAThread]

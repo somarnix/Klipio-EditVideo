@@ -922,6 +922,7 @@ void main() {
                 canvasColor: '#F4C70F',
                 canvasPattern: 'dots',
                 canvasBlur: 40,
+                flip: 'left',
               ),
             ),
           ],
@@ -936,6 +937,7 @@ void main() {
     expect(transform.canvasColor, '#F4C70F');
     expect(transform.canvasPattern, 'dots');
     expect(transform.canvasBlur, 40);
+    expect(transform.flip, 'left');
 
     final blurPlan = const MultiTrackFilterBuilder().build(
       MultiTrackExportJob(timeline: restored, outputPath: 'blur.mp4'),
@@ -948,13 +950,18 @@ void main() {
       blurPlan.filterGraph,
       contains(
         'scale=1920:1080:force_original_aspect_ratio=decrease:'
-        'force_divisible_by=2:reset_sar=1',
+        'force_divisible_by=2:reset_sar=1,'
+        'scale=trunc(iw*1/2)*2:trunc(ih*1/2)*2:reset_sar=1',
       ),
     );
     expect(
       blurPlan.filterGraph,
-      contains('x=W*(0.5)-w/2:y=H*(0.5)-h/2'),
+      contains(
+        'x=(W-w)/2+(2*(0.5)-1)*abs(W-w)/2:'
+        'y=(H-h)/2+(2*(0.5)-1)*abs(H-h)/2',
+      ),
     );
+    expect(blurPlan.filterGraph, contains('fps=30,hflip'));
     expect(blurPlan.filterGraph, contains('trim=start=0:duration=4'));
     expect(blurPlan.filterGraph, contains('setpts=PTS+2/TB'));
     expect(blurPlan.filterGraph, contains('setsar=1,format=yuv420p[outv]'));

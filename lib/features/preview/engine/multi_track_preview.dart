@@ -301,6 +301,23 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
           );
         }
         Widget visual = video;
+        final flip = clip.transformAt(
+          widget.playheadSeconds - clip.timelineStart,
+        ).flip;
+        final horizontalFlip =
+            flip == 'left' || flip == 'right' || flip == 'up';
+        final verticalFlip = flip == 'up' || flip == 'down';
+        if (horizontalFlip || verticalFlip) {
+          visual = Transform(
+            alignment: Alignment.center,
+            transform: Matrix4.diagonal3Values(
+              horizontalFlip ? -1 : 1,
+              verticalFlip ? -1 : 1,
+              1,
+            ),
+            child: visual,
+          );
+        }
         if (!textureReady || node.opacity < 0.999) {
           visual = Opacity(
             opacity: textureReady ? node.opacity.clamp(0, 1) : 0,

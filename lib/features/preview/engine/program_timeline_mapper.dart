@@ -35,8 +35,9 @@ abstract final class ProgramTimelineMapper {
 
   static ProgramTimelineTarget resolve(
     TimelineModel model,
-    double timelineSeconds,
-  ) {
+    double timelineSeconds, {
+    Map<String, double> playbackSpeedsByMediaPath = const {},
+  }) {
     final programDuration = duration(model);
     final playhead = timelineSeconds
         .clamp(0.0, programDuration > 0 ? programDuration : double.infinity)
@@ -52,10 +53,16 @@ abstract final class ProgramTimelineMapper {
     }
     final localTimelineSeconds =
         (playhead - active.timelineStart).clamp(0.0, active.duration);
+    final playbackSpeed = _safePlaybackSpeed(
+      playbackSpeedsByMediaPath[active.mediaPath] ?? 1,
+    );
     return ProgramTimelineTarget(
       timelineSeconds: playhead,
       clip: active,
-      sourceSeconds: active.sourceStart + localTimelineSeconds,
+      sourceSeconds: (active.sourceStart +
+              localTimelineSeconds * playbackSpeed)
+          .clamp(active.sourceStart, active.sourceEnd)
+          .toDouble(),
       isGap: false,
     );
   }
@@ -63,10 +70,17 @@ abstract final class ProgramTimelineMapper {
   static double timelineSecondsForSource({
     required ClipModel clip,
     required double sourceSeconds,
+    double playbackSpeed = 1,
   }) {
-    return (clip.timelineStart + sourceSeconds - clip.sourceStart)
+    final speed = _safePlaybackSpeed(playbackSpeed);
+    return (clip.timelineStart + (sourceSeconds - clip.sourceStart) / speed)
         .clamp(clip.timelineStart, clip.timelineEnd)
         .toDouble();
+  }
+
+  static double _safePlaybackSpeed(double value) {
+    if (!value.isFinite) return 1;
+    return value.clamp(0.25, 4).toDouble();
   }
 
   static ClipModel? nextPlayableVideoClip(

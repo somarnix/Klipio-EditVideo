@@ -87,6 +87,31 @@ void main() {
       );
     });
 
+    test('preview source timing matches a non-default export speed', () {
+      final clip = _clip(
+        id: 'speed-match',
+        path: 'source.mp4',
+        timelineStart: 0,
+        duration: 100,
+        sourceStart: 20,
+      );
+      final target = ProgramTimelineMapper.resolve(
+        _timeline([clip]),
+        40,
+        playbackSpeedsByMediaPath: const {'source.mp4': 1.5},
+      );
+
+      expect(target.sourceSeconds, 80);
+      expect(
+        ProgramTimelineMapper.timelineSecondsForSource(
+          clip: clip,
+          sourceSeconds: target.sourceSeconds!,
+          playbackSpeed: 1.5,
+        ),
+        40,
+      );
+    });
+
     test('returns an explicit gap instead of jumping to another clip', () {
       final first = _clip(
         id: 'first',

@@ -4884,6 +4884,7 @@ class _EditorScreenState extends State<EditorScreen>
                       positionY: copyFrame
                           ? (0.5 + edit.panY * 0.5).clamp(0, 1).toDouble()
                           : clip.transform.positionY,
+                      flip: copyFrame ? edit.flip : clip.transform.flip,
                       canvasMode: copyCanvas
                           ? (canvasMode ?? 'none')
                           : clip.transform.canvasMode,
@@ -4909,6 +4910,7 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   void _loadTimelineClipTransformIntoInspector(ClipModel clip) {
+    _flip = clip.transform.flip;
     _scaleX = clip.transform.scaleX;
     _scaleY = clip.transform.scaleY;
     _zoom = 1;
@@ -5735,6 +5737,7 @@ class _EditorScreenState extends State<EditorScreen>
               scaleY: edit.scaleY * edit.zoom,
               positionX: (0.5 + edit.panX * 0.5).clamp(0, 1).toDouble(),
               positionY: (0.5 + edit.panY * 0.5).clamp(0, 1).toDouble(),
+              flip: edit.flip,
             );
         if (!movedVideoIds.contains(baseId)) {
           videoClips.add(
@@ -6848,8 +6851,14 @@ class _EditorScreenState extends State<EditorScreen>
           final start = math.max(visibleStart, clip.timelineStart);
           final end = math.min(visibleEnd, clip.timelineEnd);
           if (end <= start) continue;
-          final sourceStart = clip.sourceStart + start - clip.timelineStart;
-          final sourceEnd = clip.sourceStart + end - clip.timelineStart;
+          final playbackSpeed = _clipTimelineEditFor(clip.mediaPath)
+              .speed
+              .clamp(_minVideoSpeed, _maxVideoSpeed)
+              .toDouble();
+          final sourceStart =
+              clip.sourceStart + (start - clip.timelineStart) * playbackSpeed;
+          final sourceEnd =
+              clip.sourceStart + (end - clip.timelineStart) * playbackSpeed;
           final previous = sourceWindows[clip.mediaPath];
           sourceWindows[clip.mediaPath] = (
             start: previous == null
@@ -7398,9 +7407,17 @@ class _EditorScreenState extends State<EditorScreen>
   bool get _hasAuthoritativeProgramTimeline =>
       ProgramTimelineMapper.hasPlayableVideo(_multiTrackTimeline);
 
+  TimelineModel get _programPreviewTimeline {
+    if (!_hasAuthoritativeProgramTimeline) return _multiTrackTimeline;
+    return _retimeTimelineForExport(
+      _multiTrackTimeline,
+      _videoPlaybackSpeedsForExport(_multiTrackTimeline),
+    );
+  }
+
   double _programPlaybackDurationSeconds() {
     if (_hasAuthoritativeProgramTimeline) {
-      return ProgramTimelineMapper.duration(_multiTrackTimeline)
+      return ProgramTimelineMapper.duration(_programPreviewTimeline)
           .clamp(0.0, double.infinity)
           .toDouble();
     }
@@ -7622,7 +7639,7 @@ class _EditorScreenState extends State<EditorScreen>
     }
     final programClipId = _programTimelineClipId;
     if (programClipId != null) {
-      final result = _multiTrackTimeline.clipById(programClipId);
+      final result = _programPreviewTimeline.clipById(programClipId);
       if (result != null &&
           result.track.type == TrackType.video &&
           result.clip.mediaPath == _videos[_selectedVideoIndex].path) {
@@ -7630,6 +7647,7 @@ class _EditorScreenState extends State<EditorScreen>
         return ProgramTimelineMapper.timelineSecondsForSource(
           clip: result.clip,
           sourceSeconds: sourceSeconds,
+          playbackSpeed: _clipTimelineEditFor(result.clip.mediaPath).speed,
         );
       }
     }
@@ -7817,9 +7835,12 @@ class _EditorScreenState extends State<EditorScreen>
 
   Future<void> _playNextProgramTimelineClip(ClipModel current) async {
     try {
+      final previewTimeline = _programPreviewTimeline;
+      final previewCurrent = previewTimeline.clipById(current.id)?.clip;
       final next = ProgramTimelineMapper.nextPlayableVideoClip(
-        _multiTrackTimeline,
-        atOrAfterTimelineSeconds: current.timelineEnd,
+        previewTimeline,
+        atOrAfterTimelineSeconds:
+            previewCurrent?.timelineEnd ?? current.timelineEnd,
         excludingClipId: current.id,
       );
       if (next == null) {
@@ -8630,12 +8651,13 @@ class _EditorScreenState extends State<EditorScreen>
         }
         lastProgressUpdate = now;
         if (!mounted) return;
-        final totalProgress =
-            ((index + clipProgress.clamp(0.0, 1.0)) / exportGroups.length)
-                .clamp(0.0, 1.0)
-                .toDouble();
+        // The dialog already identifies the current item as "N of total".
+        // Its meter therefore reports this video's own 0-100% progress and
+        // restarts for the next video instead of showing a combined batch
+        // percentage that can never reach 100% for items before the last one.
+        final currentVideoProgress = clipProgress.clamp(0.0, 1.0).toDouble();
         setState(() {
-          _progress = totalProgress;
+          _progress = currentVideoProgress;
           _status = prepareForCapCut
               ? 'Preparing CapCut clip ${index + 1} of ${exportGroups.length}: $outputName'
               : 'Exporting ${index + 1} of ${exportGroups.length}: $outputName';
@@ -8646,7 +8668,7 @@ class _EditorScreenState extends State<EditorScreen>
             durationSeconds: _queuedExportGroupDuration(group),
             thumbnailPath: group.video.thumbnailPath,
           ),
-          progress: totalProgress,
+          progress: currentVideoProgress,
           elapsed: DateTime.now().difference(exportStartedAt),
           status: prepareForCapCut
               ? 'Preparing CapCut clip ${index + 1} of ${exportGroups.length}'
@@ -8670,7 +8692,7 @@ class _EditorScreenState extends State<EditorScreen>
         }
       }
       setState(() {
-        _progress = (index + 1) / exportGroups.length;
+        _progress = 1;
         _status = prepareForCapCut
             ? 'Prepared ${index + 1} of ${exportGroups.length}'
             : 'Exported ${index + 1} of ${exportGroups.length}';
@@ -8731,14 +8753,16 @@ class _EditorScreenState extends State<EditorScreen>
             : _clipTimelineEditFor(compositionPath).speed)
         .clamp(_minVideoSpeed, _maxVideoSpeed)
         .toDouble();
+    final playbackSpeeds = _videoPlaybackSpeedsForExport(sourceTimeline);
     final exportTimeline = _retimeTimelineForExport(
       sourceTimeline,
-      playbackSpeed,
+      playbackSpeeds,
     );
     final timelineDuration = _actualMultiTrackExportDuration(exportTimeline);
-    final timelineCaptionCues = _retimeCaptionCuesForExport(
-      _exportTimelineCaptionCues(sourceTimeline),
-      playbackSpeed,
+    final timelineCaptionCues = _exportTimelineCaptionCues(
+      sourceTimeline,
+      outputTimeline: exportTimeline,
+      playbackSpeedsByMediaPath: playbackSpeeds,
     );
     final captionSettings = timelineCaptionCues.isEmpty
         ? null
@@ -8778,10 +8802,7 @@ class _EditorScreenState extends State<EditorScreen>
         exportCodec: _exportCodec,
         hardwareEncoding: widget.settings.hardwareEncoding,
         hardwareDecoding: widget.settings.hardwareDecoding,
-        playbackSpeedsByMediaPath: _videoPlaybackSpeedsForExport(
-          sourceTimeline,
-          playbackSpeed,
-        ),
+        playbackSpeedsByMediaPath: playbackSpeeds,
         textOverlays: _retimeTextOverlaysForExport(
           _exportManualTextOverlays(),
           playbackSpeed,
@@ -10478,76 +10499,67 @@ class _EditorScreenState extends State<EditorScreen>
 
   TimelineModel _retimeTimelineForExport(
     TimelineModel timeline,
-    double requestedSpeed,
+    Map<String, double> playbackSpeedsByMediaPath,
   ) {
-    final speed = requestedSpeed.clamp(_minVideoSpeed, _maxVideoSpeed);
-    if ((speed - 1).abs() < 0.0001) return timeline;
-    final tracks = [
-      for (final track in timeline.tracks)
-        track.copyWith(
-          clips: [
-            for (final clip in track.clips)
-              clip.copyWith(
-                timelineStart: clip.timelineStart / speed,
-                duration: clip.duration / speed,
-                transitionIn: clip.transitionIn == null
-                    ? null
-                    : ClipTransition(
-                        type: clip.transitionIn!.type,
-                        duration: clip.transitionIn!.duration / speed,
-                      ),
-                keyframes: [
-                  for (final keyframe in clip.keyframes)
-                    ClipKeyframe(
-                      offset: keyframe.offset / speed,
-                      transform: keyframe.transform,
-                    ),
-                ],
+    double speedFor(ClipModel clip) =>
+        (playbackSpeedsByMediaPath[clip.mediaPath] ?? 1)
+            .clamp(_minVideoSpeed, _maxVideoSpeed)
+            .toDouble();
+    final tracks = <TrackModel>[];
+    for (final track in timeline.tracks) {
+      final ordered = [...track.clips]..sort(
+          (left, right) => left.timelineStart.compareTo(right.timelineStart));
+      final retimedById = <String, ClipModel>{};
+      ClipModel? previousSource;
+      ClipModel? previousOutput;
+      for (final clip in ordered) {
+        final speed = speedFor(clip);
+        final timelineStart = previousSource == null
+            ? clip.timelineStart / speed
+            : previousOutput!.timelineEnd +
+                (clip.timelineStart - previousSource.timelineEnd) / speed;
+        final retimed = clip.copyWith(
+          timelineStart: math.max(0, timelineStart).toDouble(),
+          duration: clip.duration / speed,
+          transitionIn: clip.transitionIn == null
+              ? null
+              : ClipTransition(
+                  type: clip.transitionIn!.type,
+                  duration: clip.transitionIn!.duration / speed,
+                ),
+          keyframes: [
+            for (final keyframe in clip.keyframes)
+              ClipKeyframe(
+                offset: keyframe.offset / speed,
+                transform: keyframe.transform,
               ),
           ],
-        ),
-    ];
+        );
+        retimedById[clip.id] = retimed;
+        previousSource = clip;
+        previousOutput = retimed;
+      }
+      tracks.add(track.copyWith(
+        clips: [for (final clip in track.clips) retimedById[clip.id] ?? clip],
+      ));
+    }
     return TimelineModel(
       tracks: tracks,
-      duration: timeline.duration / speed,
+      duration: TimelineModel.calculateDuration(tracks),
     ).normalized();
   }
 
   Map<String, double> _videoPlaybackSpeedsForExport(
     TimelineModel sourceTimeline,
-    double requestedSpeed,
   ) {
-    final speed = requestedSpeed.clamp(_minVideoSpeed, _maxVideoSpeed);
     return {
       for (final track in sourceTimeline.videoTracks)
-        for (final clip in track.clips) clip.mediaPath: speed,
+        for (final clip in track.clips)
+          clip.mediaPath: _clipTimelineEditFor(clip.mediaPath)
+              .speed
+              .clamp(_minVideoSpeed, _maxVideoSpeed)
+              .toDouble(),
     };
-  }
-
-  List<CaptionCueSettings> _retimeCaptionCuesForExport(
-    List<CaptionCueSettings> cues,
-    double requestedSpeed,
-  ) {
-    final speed = requestedSpeed.clamp(_minVideoSpeed, _maxVideoSpeed);
-    if ((speed - 1).abs() < 0.0001) return cues;
-    return [
-      for (final cue in cues)
-        CaptionCueSettings(
-          start: cue.start / speed,
-          end: cue.end / speed,
-          text: cue.text,
-          x: cue.x,
-          y: cue.y,
-          words: [
-            for (final word in cue.words)
-              CaptionWordSettings(
-                start: word.start / speed,
-                end: word.end / speed,
-                text: word.text,
-              ),
-          ],
-        ),
-    ];
   }
 
   List<TextOverlaySettings> _retimeTextOverlaysForExport(
@@ -10591,101 +10603,144 @@ class _EditorScreenState extends State<EditorScreen>
     required ExportCancelToken cancelToken,
     required void Function(double progress, String status) onProgress,
   }) async {
-    final timeline = group.video.path == _selectedCompositionPath
+    final storedTimeline = group.video.path == _selectedCompositionPath
         ? _multiTrackTimeline
         : _timelinesByComposition[group.video.path];
-    final hasVideo = timeline != null &&
-        timeline.videoTracks.any(
+    final hasStoredVideo = storedTimeline != null &&
+        storedTimeline.videoTracks.any(
           (track) =>
               !track.isMuted &&
               track.clips.any(
                 (clip) => !clip.isMuted && clip.duration > 0.001,
               ),
         );
-    if (timeline != null && hasVideo) {
-      final dimensions = _multiTrackOutputDimensions();
-      final playbackSpeed = _clipTimelineEditFor(group.video.path)
-          .speed
-          .clamp(_minVideoSpeed, _maxVideoSpeed)
-          .toDouble();
-      final sourceTimelineDuration = _actualMultiTrackExportDuration(timeline);
-      final sourceTimeline = timeline.copyWith(
-        duration: sourceTimelineDuration,
-      );
-      final exportTimeline = _retimeTimelineForExport(
-        sourceTimeline,
-        playbackSpeed,
-      );
-      final timelineDuration = _actualMultiTrackExportDuration(exportTimeline);
-      final captionCues = _retimeCaptionCuesForExport(
-        _exportTimelineCaptionCues(sourceTimeline),
-        playbackSpeed,
-      );
-      final captionSettings = captionCues.isEmpty
-          ? null
-          : _settings.copyWith(
-              automaticCaptions: false,
-              speed: 1,
-              trimStartSeconds: 0,
-              trimEndSeconds: timelineDuration,
-              textOverlays: const [],
-              captionCues: captionCues,
-            );
-      return exportMultiTrackTimeline(
-        MultiTrackExportJob(
-          timeline: exportTimeline.copyWith(duration: timelineDuration),
-          outputPath: group.outputPath,
-          width: dimensions.width,
-          height: dimensions.height,
-          frameRate:
-              _exportFrameRate > 0 ? _exportFrameRate : _projectFrameRate,
-          videoBitrateKbps: _exportBitrateKbps,
-          exportCodec: _exportCodec,
-          hardwareEncoding: widget.settings.hardwareEncoding,
-          hardwareDecoding: widget.settings.hardwareDecoding,
-          playbackSpeedsByMediaPath: _videoPlaybackSpeedsForExport(
-            sourceTimeline,
-            playbackSpeed,
-          ),
-          textOverlays: _retimeTextOverlaysForExport(
-            _exportManualTextOverlays(),
-            playbackSpeed,
-          ),
-          captionSettings: captionSettings,
-          cancelToken: cancelToken,
-          onProgress: onProgress,
-        ),
-      );
-    }
-
-    if (group.parts.length == 1) {
-      return exportVideo(
-        ExportJob(
-          inputPath: group.video.path,
-          outputPath: group.outputPath,
-          settings: group.parts.first.settings,
-          cancelToken: cancelToken,
-          onProgress: onProgress,
-        ),
-      );
-    }
-    return exportVideoSequence(
-      SequenceExportJob(
-        jobs: [
-          for (final part in group.parts)
-            ExportJob(
-              inputPath: group.video.path,
-              outputPath: part.outputPath,
-              settings: part.settings,
-              cancelToken: cancelToken,
-            ),
-        ],
+    // Separate-part exports must contain only that requested part. Older
+    // project files can also be missing their saved timeline. Build a small
+    // canonical timeline for both cases so every export uses the exact same
+    // transform/canvas/caption renderer as Program Monitor.
+    final useStoredTimeline =
+        hasStoredVideo && !group.parts.any((part) => part.partIndex != null);
+    final requestedTimeline = useStoredTimeline
+        ? storedTimeline
+        : _timelineForQueuedExportGroup(group);
+    final dimensions = _multiTrackOutputDimensions();
+    final playbackSpeed = group.parts.first.settings.speed
+        .clamp(_minVideoSpeed, _maxVideoSpeed)
+        .toDouble();
+    final sourceTimelineDuration =
+        _actualMultiTrackExportDuration(requestedTimeline);
+    final sourceTimeline = requestedTimeline.copyWith(
+      duration: sourceTimelineDuration,
+    );
+    final playbackSpeeds = _videoPlaybackSpeedsForExport(sourceTimeline);
+    final exportTimeline = _retimeTimelineForExport(
+      sourceTimeline,
+      playbackSpeeds,
+    );
+    final timelineDuration = _actualMultiTrackExportDuration(exportTimeline);
+    final captionCues = _exportTimelineCaptionCues(
+      sourceTimeline,
+      outputTimeline: exportTimeline,
+      playbackSpeedsByMediaPath: playbackSpeeds,
+    );
+    final captionSettings = captionCues.isEmpty
+        ? null
+        : _settings.copyWith(
+            automaticCaptions: false,
+            speed: 1,
+            trimStartSeconds: 0,
+            trimEndSeconds: timelineDuration,
+            textOverlays: const [],
+            captionCues: captionCues,
+          );
+    return exportMultiTrackTimeline(
+      MultiTrackExportJob(
+        timeline: exportTimeline.copyWith(duration: timelineDuration),
         outputPath: group.outputPath,
-        settings: group.parts.first.settings,
+        width: dimensions.width,
+        height: dimensions.height,
+        frameRate: _exportFrameRate > 0 ? _exportFrameRate : _projectFrameRate,
+        videoBitrateKbps: _exportBitrateKbps,
+        exportCodec: _exportCodec,
+        hardwareEncoding: widget.settings.hardwareEncoding,
+        hardwareDecoding: widget.settings.hardwareDecoding,
+        playbackSpeedsByMediaPath: playbackSpeeds,
+        textOverlays: _retimeTextOverlaysForExport(
+          _exportManualTextOverlays(),
+          playbackSpeed,
+        ),
+        captionSettings: captionSettings,
         cancelToken: cancelToken,
         onProgress: onProgress,
       ),
     );
+  }
+
+  TimelineModel _timelineForQueuedExportGroup(_QueuedExportGroup group) {
+    final videoClips = <ClipModel>[];
+    final audioClips = <ClipModel>[];
+    var cursor = 0.0;
+    for (var index = 0; index < group.parts.length; index++) {
+      final part = group.parts[index];
+      final settings = part.settings;
+      final sourceStart = settings.trimStartSeconds.clamp(0.0, double.infinity);
+      final sourceEnd = settings.trimEndSeconds > sourceStart
+          ? settings.trimEndSeconds
+          : group.video.durationSeconds ?? sourceStart + 0.001;
+      final sourceDuration =
+          math.max(0.001, sourceEnd - sourceStart).toDouble();
+      final clipId = 'queued-${group.video.path.hashCode}-$index';
+      final transform = ClipTransform(
+        scaleX: settings.scaleX * settings.zoom,
+        scaleY: settings.scaleY * settings.zoom,
+        positionX: (0.5 + settings.panX * 0.5).clamp(0.0, 1.0).toDouble(),
+        positionY: (0.5 + settings.panY * 0.5).clamp(0.0, 1.0).toDouble(),
+        flip: settings.flip,
+        canvasMode: settings.canvasMode,
+        canvasColor: settings.canvasColor,
+        canvasPattern: settings.canvasPattern,
+        canvasBlur: settings.canvasBlur,
+      );
+      final videoClip = ClipModel(
+        id: clipId,
+        mediaPath: group.video.path,
+        timelineStart: cursor,
+        duration: sourceDuration,
+        sourceStart: sourceStart,
+        zIndex: 0,
+        transform: transform,
+      );
+      videoClips.add(videoClip);
+      if (group.video.hasAudio && settings.originalVolume > 0) {
+        audioClips.add(
+          videoClip.copyWith(
+            id: 'audio-$clipId',
+            volume: settings.originalVolume,
+            isLinkedAudio: true,
+            linkedClipId: clipId,
+          ),
+        );
+      }
+      cursor += sourceDuration;
+    }
+    final tracks = <TrackModel>[
+      TrackModel(
+        id: 'video-1',
+        type: TrackType.video,
+        index: 1,
+        clips: videoClips,
+      ),
+      TrackModel(
+        id: 'audio-1',
+        type: TrackType.audio,
+        index: 1,
+        clips: audioClips,
+      ),
+    ];
+    return TimelineModel(
+      tracks: tracks,
+      duration: TimelineModel.calculateDuration(tracks),
+    ).normalized();
   }
 
   double _actualMultiTrackExportDuration([TimelineModel? requestedTimeline]) {
@@ -18750,8 +18805,12 @@ class _EditorScreenState extends State<EditorScreen>
     final playhead = seconds.clamp(0.0, double.infinity).toDouble();
     if (_hasAuthoritativeProgramTimeline) {
       final resolved = ProgramTimelineMapper.resolve(
-        _multiTrackTimeline,
+        _programPreviewTimeline,
         playhead,
+        playbackSpeedsByMediaPath: {
+          for (final video in _videos)
+            video.path: _clipTimelineEditFor(video.path).speed,
+        },
       );
       final clip = resolved.clip;
       if (clip == null) {
@@ -24526,7 +24585,7 @@ class _EditorScreenState extends State<EditorScreen>
     // active timeline clip. Resolve the program playhead first, then map that
     // active clip back to source time for its source-based caption cues.
     final timelineSeconds = _currentProgramSeconds();
-    for (final track in _multiTrackTimeline.videoTracks) {
+    for (final track in _programPreviewTimeline.videoTracks) {
       if (track.isMuted) continue;
       for (final clip in track.clips.reversed) {
         if (clip.isMuted ||
@@ -24534,8 +24593,12 @@ class _EditorScreenState extends State<EditorScreen>
             timelineSeconds >= clip.timelineEnd) {
           continue;
         }
-        final sourceSeconds =
-            clip.sourceStart + timelineSeconds - clip.timelineStart;
+        final playbackSpeed = _clipTimelineEditFor(clip.mediaPath)
+            .speed
+            .clamp(_minVideoSpeed, _maxVideoSpeed)
+            .toDouble();
+        final sourceSeconds = clip.sourceStart +
+            (timelineSeconds - clip.timelineStart) * playbackSpeed;
         for (final cue
             in _captionCuesByVideo[clip.mediaPath] ?? const <_CaptionCue>[]) {
           if (sourceSeconds >= cue.start && sourceSeconds < cue.end) return cue;
@@ -25059,6 +25122,7 @@ class _EditorScreenState extends State<EditorScreen>
     final yScale = _scaleY * _zoom * (vFlip ? -1 : 1);
     final textOverlays = _previewTextOverlays();
     final previewSeconds = _currentProgramSeconds();
+    final previewTimeline = _programPreviewTimeline;
     final professionalClip = _activeBaseVideoClip(previewSeconds);
     final canvasTransform = professionalClip?.transformAt(
       previewSeconds - professionalClip.timelineStart,
@@ -25066,14 +25130,14 @@ class _EditorScreenState extends State<EditorScreen>
     final hasLayeredVideo = _multiTrackTimeline.hasLayeredVideo;
     final activeVideoLayers = hasLayeredVideo
         ? MultiTrackPreview.activeVideoLayers(
-            model: _multiTrackTimeline,
+            model: previewTimeline,
             playheadSeconds: previewSeconds,
             includeBaseTrack: true,
           )
         : const <({TrackModel track, ClipModel clip})>[];
     final directTextureLayer = hasLayeredVideo
         ? MultiTrackPreview.directTextureLayer(
-            model: _multiTrackTimeline,
+            model: previewTimeline,
             playheadSeconds: previewSeconds,
             preferredMediaPath: _videos[_selectedVideoIndex].path,
           )
@@ -25194,7 +25258,7 @@ class _EditorScreenState extends State<EditorScreen>
                       child: Builder(
                         builder: (context) {
                           Widget preview = MultiTrackPreview(
-                            model: _multiTrackTimeline,
+                            model: previewTimeline,
                             playheadSeconds: previewSeconds,
                             isPlaying: controller.value.isPlaying,
                             includeBaseTrack: true,
@@ -25404,8 +25468,9 @@ class _EditorScreenState extends State<EditorScreen>
   }
 
   ClipModel? _activeBaseVideoClip(double playhead) {
-    if (_multiTrackTimeline.videoTracks.isEmpty) return null;
-    final track = _multiTrackTimeline.videoTracks.first;
+    final timeline = _programPreviewTimeline;
+    if (timeline.videoTracks.isEmpty) return null;
+    final track = timeline.videoTracks.first;
     if (track.isMuted) return null;
     for (final clip in track.clips) {
       if (!clip.isMuted &&
@@ -26557,29 +26622,42 @@ class _EditorScreenState extends State<EditorScreen>
           .map((overlay) => overlay.toSettings(_colorToHex))
           .toList();
 
-  List<CaptionCueSettings> _exportTimelineCaptionCues([
-    TimelineModel? requestedTimeline,
-  ]) {
+  List<CaptionCueSettings> _exportTimelineCaptionCues(
+    TimelineModel requestedTimeline, {
+    TimelineModel? outputTimeline,
+    Map<String, double> playbackSpeedsByMediaPath = const {},
+  }) {
     if (!_automaticCaptions ||
         _captionTrackHidden ||
         _captionCuesByVideo.isEmpty) {
       return const [];
     }
     final result = <CaptionCueSettings>[];
-    final timeline = requestedTimeline ?? _multiTrackTimeline;
-    final timelineEnd = _actualMultiTrackExportDuration(timeline);
+    final timeline = requestedTimeline;
+    final renderedTimeline = outputTimeline ?? requestedTimeline;
+    final timelineEnd = _actualMultiTrackExportDuration(renderedTimeline);
+    final outputClips = <String, ClipModel>{
+      for (final track in renderedTimeline.videoTracks)
+        for (final clip in track.clips) clip.id: clip,
+    };
     for (final track in timeline.videoTracks) {
       if (track.isMuted) continue;
       for (final clip in track.clips) {
         if (clip.isMuted) continue;
+        final outputClip = outputClips[clip.id] ?? clip;
+        final speed = (playbackSpeedsByMediaPath[clip.mediaPath] ?? 1)
+            .clamp(_minVideoSpeed, _maxVideoSpeed)
+            .toDouble();
         final cues =
             _captionCuesByVideo[clip.mediaPath] ?? const <_CaptionCue>[];
         for (final cue in cues) {
           final sourceStart = math.max(cue.start, clip.sourceStart);
           final sourceEnd = math.min(cue.end, clip.sourceEnd);
           if (sourceEnd - sourceStart <= 0.01) continue;
-          final start = clip.timelineStart + sourceStart - clip.sourceStart;
-          final end = clip.timelineStart + sourceEnd - clip.sourceStart;
+          final start = outputClip.timelineStart +
+              (sourceStart - clip.sourceStart) / speed;
+          final end =
+              outputClip.timelineStart + (sourceEnd - clip.sourceStart) / speed;
           if (start >= timelineEnd || end <= 0) continue;
           final text = normalizeAssDisplayText(cue.text).trim();
           if (text.isEmpty) continue;
@@ -26594,14 +26672,16 @@ class _EditorScreenState extends State<EditorScreen>
                 for (final word in cue.words)
                   if (word.end > sourceStart && word.start < sourceEnd)
                     CaptionWordSettings(
-                      start: (clip.timelineStart +
-                              math.max(word.start, sourceStart) -
-                              clip.sourceStart)
+                      start: (outputClip.timelineStart +
+                              (math.max(word.start, sourceStart) -
+                                      clip.sourceStart) /
+                                  speed)
                           .clamp(0.0, timelineEnd)
                           .toDouble(),
-                      end: (clip.timelineStart +
-                              math.min(word.end, sourceEnd) -
-                              clip.sourceStart)
+                      end: (outputClip.timelineStart +
+                              (math.min(word.end, sourceEnd) -
+                                      clip.sourceStart) /
+                                  speed)
                           .clamp(0.0, timelineEnd)
                           .toDouble(),
                       text: normalizeAssDisplayText(word.text),
