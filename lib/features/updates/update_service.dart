@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 
-const klipioCurrentVersion = '2.0.17';
+const klipioCurrentVersion = '2.0.19';
 
 class KlipioUpdateInfo {
   const KlipioUpdateInfo({

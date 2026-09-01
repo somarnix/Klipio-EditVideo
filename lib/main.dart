@@ -3558,7 +3558,6 @@ class _EditorScreenState extends State<EditorScreen>
   final Map<String, List<double>> _audioWaveformPeaks = {};
   final Map<String, double> _audioWaveformPeakRates = {};
   final Map<String, Future<String?>> _proxyJobsBySource = {};
-  final Set<String> _proxyUnavailableSources = {};
   final TimelineMarqueeController _timelineMarqueeController =
       TimelineMarqueeController();
   ({ClipModel clip, TrackType type})? _timelineClipboard;
@@ -6288,11 +6287,13 @@ class _EditorScreenState extends State<EditorScreen>
         (smartEnabled && platform.mediaNeedsProxy(_probeInfoForVideo(video)));
   }
 
-  String? _availablePreviewPath(PickedVideo video) {
+  String _availablePreviewPath(PickedVideo video) {
     final proxy = video.proxyPath;
     if (proxy != null && File(proxy).existsSync()) return proxy;
-    if (_proxyUnavailableSources.contains(video.path)) return video.path;
-    return _shouldUseProxy(video) ? null : video.path;
+    // Opening the editor must never wait for a full-length proxy render.
+    // Only one bounded source decoder is opened while the lightweight proxy
+    // is prepared in the background; the controller switches when ready.
+    return video.path;
   }
 
   Future<String> _proxyCacheFolder() async {
@@ -6324,7 +6325,6 @@ class _EditorScreenState extends State<EditorScreen>
         resolution: _projectProxyResolution,
       );
       if (proxy == null || !File(proxy).existsSync()) {
-        _proxyUnavailableSources.add(video.path);
         if (mounted) {
           final index = _videos.indexWhere((item) => item.path == video.path);
           final shouldReload = index == _selectedVideoIndex;
@@ -6338,7 +6338,6 @@ class _EditorScreenState extends State<EditorScreen>
         }
         return null;
       }
-      _proxyUnavailableSources.remove(video.path);
       if (!mounted) return proxy;
       final index = _videos.indexWhere((item) => item.path == video.path);
       if (index < 0) return proxy;
@@ -6617,23 +6616,18 @@ class _EditorScreenState extends State<EditorScreen>
     String? sourceError;
     String? previewError;
     final initialPreviewPath = _availablePreviewPath(enriched.first);
-    if (initialPreviewPath == null) {
-      sourceError = 'Preparing lightweight preview...';
-      previewError = 'Preparing lightweight preview...';
-    } else {
-      try {
-        sourceController = await createPreviewController(initialPreviewPath);
-        await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
-      } catch (error) {
-        sourceController = null;
-        sourceError = 'Cannot play source: $error';
-      }
-      try {
-        controller = await createPreviewController(initialPreviewPath);
-      } catch (error) {
-        controller = null;
-        previewError = 'Cannot play preview: $error';
-      }
+    try {
+      sourceController = await createPreviewController(initialPreviewPath);
+      await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
+    } catch (error) {
+      sourceController = null;
+      sourceError = 'Cannot play source: $error';
+    }
+    try {
+      controller = await createPreviewController(initialPreviewPath);
+    } catch (error) {
+      controller = null;
+      previewError = 'Cannot play preview: $error';
     }
 
     if (!mounted || loadGeneration != _controllerLoadGeneration) {
@@ -6971,7 +6965,6 @@ class _EditorScreenState extends State<EditorScreen>
       await terminateAllKlipioWorkers();
     }
     _proxyJobsBySource.clear();
-    _proxyUnavailableSources.clear();
     await _stopMusicPreview();
     final source = _sourceController;
     final preview = _previewController;
@@ -7208,24 +7201,18 @@ class _EditorScreenState extends State<EditorScreen>
     String? previewError;
     final selectedVideo = _videos[index];
     final previewPath = _availablePreviewPath(selectedVideo);
-    if (previewPath == null) {
-      sourceError = 'Preparing lightweight preview...';
-      previewError = 'Preparing lightweight preview...';
-      unawaited(_ensureProxyForVideo(selectedVideo));
-    } else {
-      try {
-        sourceController = await createPreviewController(previewPath);
-        await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
-      } catch (error) {
-        sourceController = null;
-        sourceError = 'Cannot play source: $error';
-      }
-      try {
-        controller = await createPreviewController(previewPath);
-      } catch (error) {
-        controller = null;
-        previewError = 'Cannot play preview: $error';
-      }
+    try {
+      sourceController = await createPreviewController(previewPath);
+      await sourceController.setVolume(_previewAudioVolume(_sourceVolume));
+    } catch (error) {
+      sourceController = null;
+      sourceError = 'Cannot play source: $error';
+    }
+    try {
+      controller = await createPreviewController(previewPath);
+    } catch (error) {
+      controller = null;
+      previewError = 'Cannot play preview: $error';
     }
     if (!mounted || loadGeneration != _controllerLoadGeneration) {
       await sourceController?.dispose();
@@ -7252,7 +7239,6 @@ class _EditorScreenState extends State<EditorScreen>
     ++_filmstripLoadGeneration;
     await platform.cancelBackgroundMediaTasks();
     _proxyJobsBySource.clear();
-    _proxyUnavailableSources.clear();
     final removed = _videos[index];
     final wasActiveComposition = removed.path == _selectedCompositionPath;
     _storeActiveCompositionTimeline();
