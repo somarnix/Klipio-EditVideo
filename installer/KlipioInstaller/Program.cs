@@ -9,7 +9,7 @@ namespace KlipioSetup;
 internal static class Program
 {
     private const string AppName = "Klipio";
-    private const string AppVersion = "2.0.22";
+    private static readonly string AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "development";
     private const string AppExeName = "Klipio.exe";
 
     [STAThread]
@@ -596,7 +596,7 @@ internal static class Program
             _summary.Text = $"Klipio version\r\n    {AppVersion}\r\n\r\nInstallation folder\r\n    {_folder.Text}" +
                 (_installedVersion == null ? "" : $"\r\n\r\nUpgrade\r\n    Remove Klipio {_installedVersion} application files, then install {AppVersion}") +
                 $"\r\n\r\nRequired storage\r\n    {Bytes(PayloadSize())}" +
-                "\r\n\r\nIncluded components\r\n    Klipio desktop app, FFmpeg media tools, caption engine integration" +
+                "\r\n\r\nIncluded components\r\n    Klipio desktop app, FFmpeg, Python, caption libraries and English speech model" +
                 $"\r\n\r\nShortcuts\r\n    {(shortcuts.Count == 0 ? "None" : string.Join(", ", shortcuts))}" +
                 "\r\n\r\nLaunch at Windows sign-in\r\n    Off";
         }
@@ -706,6 +706,9 @@ internal static class Program
                 report((i + 1d) / Math.Max(1, archive.Entries.Count));
             }
             if (!File.Exists(Path.Combine(stage, AppExeName))) throw new InvalidDataException("Klipio.exe is missing from the installer payload.");
+            foreach (var required in new[] { "ffmpeg.exe", "ffprobe.exe", "python/python.exe", "python/Lib/site-packages/faster_whisper/__init__.py" })
+                if (!File.Exists(Path.Combine(stage, required)))
+                    throw new InvalidDataException($"Required runtime component is missing: {required}");
             if (!File.Exists(Path.Combine(stage, "data", "app.so")) ||
                 !File.Exists(Path.Combine(stage, "data", "icudtl.dat")) ||
                 !Directory.Exists(Path.Combine(stage, "data", "flutter_assets")))

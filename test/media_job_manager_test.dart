@@ -136,4 +136,47 @@ void main() {
     await handle.dispose();
     expect(manager.jobs, isEmpty);
   });
+
+  test('visible filmstrips run during background pause within decoder bounds',
+      () async {
+    final manager = MediaJobManager();
+    manager.pauseBackgroundWork();
+    var proxyStarted = false;
+    var secondStarted = false;
+    final release = Completer<void>();
+    final firstStarted = Completer<void>();
+    final proxy = manager.schedule<void>(
+      type: MediaJobType.proxy,
+      task: (_) async {
+        proxyStarted = true;
+      },
+    );
+    final first = manager.schedule<void>(
+      type: MediaJobType.thumbnail,
+      priority: MediaJobPriority.interactive,
+      task: (_) async {
+        firstStarted.complete();
+        await release.future;
+      },
+    );
+    final second = manager.schedule<void>(
+      type: MediaJobType.thumbnail,
+      priority: MediaJobPriority.interactive,
+      task: (_) async {
+        secondStarted = true;
+      },
+    );
+    await firstStarted.future;
+    expect(proxyStarted, isFalse);
+    expect(secondStarted, isFalse);
+    expect(manager.runningCount, 1, reason: 'Only one thumbnail decoder');
+    release.complete();
+    await Future.wait([first, second]);
+    expect(secondStarted, isTrue);
+    expect(proxyStarted, isFalse);
+    manager.resumeBackgroundWork();
+    await proxy;
+    expect(manager.pendingCount, 0);
+    expect(manager.runningCount, 0);
+  });
 }

@@ -85,11 +85,20 @@ bool FlutterWindow::OnCreate() {
           pid = static_cast<DWORD>(*int64_value);
         }
         HANDLE process = ::OpenProcess(
-            PROCESS_SET_QUOTA | PROCESS_TERMINATE |
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_SET_INFORMATION |
                 PROCESS_QUERY_LIMITED_INFORMATION,
             FALSE, pid);
         const bool assigned = process != nullptr &&
-                              ::AssignProcessToJobObject(process_job_, process);
+                            ::AssignProcessToJobObject(process_job_, process);
+        const auto background = arguments->find(flutter::EncodableValue("background"));
+        if (process != nullptr && background != arguments->end()) {
+          const auto* enabled = std::get_if<bool>(&background->second);
+          if (enabled != nullptr && *enabled) {
+            // UI/native playback and export retain normal priority. Cache
+            // preparation yields CPU scheduling priority when they compete.
+            ::SetPriorityClass(process, BELOW_NORMAL_PRIORITY_CLASS);
+          }
+        }
         if (process != nullptr) ::CloseHandle(process);
         result->Success(flutter::EncodableValue(assigned));
       });

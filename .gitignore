@@ -34,6 +34,17 @@ migrate_working_dir/
 /installer/KlipioInstaller/obj/
 /installer/dist/
 /release/archive/
+/release/current/
+/release/symbols/
+/release/.staging/
+/installer/payload/
+/installer/tools/
+/installer/staging/
+/installer/downloads/
+*.pfx
+*.p12
+.env
+.env.*
 
 # Symbolication related
 app.*.symbols

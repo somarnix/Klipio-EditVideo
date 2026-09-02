@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import '../../core/storage/application_paths.dart';
 
 import '../process/windows_process_job.dart';
 
@@ -9,7 +10,8 @@ class FfprobeService {
   final String executable;
 
   Future<Map<String, Object?>> inspect(String mediaPath) async {
-    final process = await Process.start(executable, [
+    final process =
+        await Process.start(ApplicationPaths.mediaTool(executable), [
       '-v',
       'error',
       '-show_format',

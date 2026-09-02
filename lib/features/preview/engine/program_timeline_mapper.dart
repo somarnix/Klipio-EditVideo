@@ -24,6 +24,32 @@ class ProgramTimelineTarget {
 /// reads legacy deleted ranges. Once clips exist, [TimelineModel] is the only
 /// edit decision list used by Program Monitor playback.
 abstract final class ProgramTimelineMapper {
+  /// A stopped monitor at the exclusive endpoint holds the last project-grid
+  /// frame. Transport time, clip membership and export duration stay unchanged.
+  static double monitorFrameTime(TimelineModel model, double seconds,
+      {required double frameRate}) {
+    final end = duration(model);
+    final time = seconds.clamp(0.0, end).toDouble();
+    if (time < end || end <= 0 || !frameRate.isFinite || frameRate <= 0) {
+      return time;
+    }
+    return ((end * frameRate).ceil() - 1) / frameRate;
+  }
+
+  static ProgramTimelineTarget resolveMonitor(
+      TimelineModel model, double seconds,
+      {required double frameRate,
+      Map<String, double> playbackSpeedsByMediaPath = const {}}) {
+    final resolved = resolve(
+        model, monitorFrameTime(model, seconds, frameRate: frameRate),
+        playbackSpeedsByMediaPath: playbackSpeedsByMediaPath);
+    return ProgramTimelineTarget(
+        timelineSeconds: seconds.clamp(0.0, duration(model)).toDouble(),
+        clip: resolved.clip,
+        sourceSeconds: resolved.sourceSeconds,
+        isGap: resolved.isGap);
+  }
+
   static bool hasPlayableVideo(TimelineModel model) => model.videoTracks.any(
         (track) => !track.isMuted && track.clips.any((clip) => !clip.isMuted),
       );
@@ -51,18 +77,14 @@ abstract final class ProgramTimelineMapper {
         isGap: true,
       );
     }
-    final localTimelineSeconds =
-        (playhead - active.timelineStart).clamp(0.0, active.duration);
     final playbackSpeed = _safePlaybackSpeed(
-      playbackSpeedsByMediaPath[active.mediaPath] ?? 1,
+      active.resolvedPlaybackSpeed(
+          playbackSpeedsByMediaPath[active.mediaPath] ?? 1),
     );
     return ProgramTimelineTarget(
       timelineSeconds: playhead,
       clip: active,
-      sourceSeconds: (active.sourceStart +
-              localTimelineSeconds * playbackSpeed)
-          .clamp(active.sourceStart, active.sourceEnd)
-          .toDouble(),
+      sourceSeconds: active.sourceTimeAtProgramTime(playhead, playbackSpeed),
       isGap: false,
     );
   }
@@ -87,11 +109,15 @@ abstract final class ProgramTimelineMapper {
     TimelineModel model, {
     required double atOrAfterTimelineSeconds,
     String? excludingClipId,
+    bool includeOverlapping = false,
   }) {
     final clips = _playableVideoClips(model)
         .where((clip) => clip.id != excludingClipId)
         .where(
-          (clip) => clip.timelineStart >= atOrAfterTimelineSeconds - 0.03,
+          (clip) =>
+              clip.timelineStart >= atOrAfterTimelineSeconds ||
+              (includeOverlapping &&
+                  clip.timelineEnd > atOrAfterTimelineSeconds),
         )
         .toList()
       ..sort(_programOrder);
@@ -110,8 +136,8 @@ abstract final class ProgramTimelineMapper {
           .where(
             (clip) =>
                 !clip.isMuted &&
-                playhead >= clip.timelineStart - 0.001 &&
-                playhead < clip.timelineEnd - 0.001,
+                playhead >= clip.timelineStart &&
+                playhead < clip.timelineEnd,
           )
           .toList()
         ..sort((a, b) {

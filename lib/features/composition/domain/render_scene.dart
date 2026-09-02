@@ -67,6 +67,7 @@ abstract final class RenderSceneResolver {
     required TimelineModel timeline,
     required CompositionModel composition,
     required double timelineSeconds,
+    Map<String, double> playbackSpeedsByMediaPath = const <String, double>{},
   }) {
     final nodes = <RenderClipNode>[];
     for (final track in timeline.videoTracks) {
@@ -81,6 +82,8 @@ abstract final class RenderSceneResolver {
           clip: clip,
           composition: composition,
           timelineSeconds: timelineSeconds,
+          playbackSpeed: clip.resolvedPlaybackSpeed(
+              playbackSpeedsByMediaPath[clip.mediaPath] ?? 1),
         ));
       }
     }

@@ -202,7 +202,7 @@ void main() {
     expect(model.clipById('audio-linked-b-6000'), isNotNull);
   });
 
-  test('deleting the V1 opening ripples V1 and linked audio only', () {
+  test('deleting the V1 opening ripples the anchored unlocked timeline', () {
     const model = TimelineModel(
       tracks: [
         TrackModel(
@@ -280,7 +280,7 @@ void main() {
     expect(deleted.clipById('audio-opening'), isNull);
     expect(deleted.clipById('main')!.clip.timelineStart, 0);
     expect(deleted.clipById('audio-main')!.clip.timelineStart, 0);
-    expect(deleted.clipById('overlay')!.clip.timelineStart, 4);
+    expect(deleted.clipById('overlay')!.clip.timelineStart, 1);
   });
 
   test('keep after playhead removes the left side and closes the V1 gap', () {
@@ -893,10 +893,10 @@ void main() {
     expect(plan.filterGraph, contains('fps=30'));
     expect(plan.filterGraph, contains('overlay=x='));
     expect(plan.filterGraph, contains('blend=all_mode=multiply'));
-    expect(plan.filterGraph, contains("enable='between(t,1,3)'"));
+    expect(plan.filterGraph, contains("enable='gte(t,1)*lt(t,3)'"));
     expect(plan.filterGraph, contains('amix=inputs=2'));
     expect(plan.filterGraph, contains('drawtext='));
-    expect(plan.filterGraph, contains(r'between(t\,1.5\,3.5)'));
+    expect(plan.filterGraph, contains(r'gte(t\,1.5)*lt(t\,3.5)'));
     expect(plan.filterGraph, contains('setsar=1,format=yuv420p[outv]'));
     expect(plan.arguments, contains('[outv]'));
     expect(plan.arguments, contains('[outa]'));

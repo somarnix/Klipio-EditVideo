@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import '../../../core/storage/application_paths.dart';
 
 import '../../export/domain/export_models.dart';
+import '../../text/domain/text_case.dart';
 import '../../../services/process/windows_process_job.dart';
 
 class CaptionGenerationException implements Exception {
@@ -51,7 +53,7 @@ Future<String> generateAutomaticCaptionAss(
   final script = await _captionScriptPath();
   final python = await _pythonCommand(cancelToken: job.cancelToken);
   final cacheDirectory = Directory(
-    '${Directory.systemTemp.path}${Platform.pathSeparator}klipio_whisper_cache',
+    '${ApplicationPaths.cache.path}${Platform.pathSeparator}transcripts',
   );
   await cacheDirectory.create(recursive: true);
 
@@ -225,7 +227,7 @@ Future<String> generateManualCaptionAss(
   // the same visual size, outline and draggable center position as Preview.
   final metricScale = safePlayResHeight / 1080.0;
   final cacheDirectory = Directory(
-    '${Directory.systemTemp.path}${Platform.pathSeparator}klipio_manual_captions',
+    '${ApplicationPaths.temporary.path}${Platform.pathSeparator}klipio_manual_captions',
   );
   await cacheDirectory.create(recursive: true);
   final identity = Object.hashAll([
@@ -357,18 +359,7 @@ String _manualAssText(String value) => value
     .replaceAll('\n', r'\N');
 
 String _manualCaptionText(String letterCase, String text) {
-  return switch (letterCase) {
-    'upper' => text.toUpperCase(),
-    'lower' => text.toLowerCase(),
-    'title' => text.splitMapJoin(
-        RegExp(r'\S+'),
-        onMatch: (match) {
-          final part = match.group(0)!;
-          return '${part[0].toUpperCase()}${part.substring(1).toLowerCase()}';
-        },
-      ),
-    _ => text,
-  };
+  return applyTextCase(text, letterCase);
 }
 
 String _manualAssColor(String input, {double opacity = 1}) {
@@ -447,7 +438,7 @@ Future<_CaptionProcessResult> _runCaptionProcess(
   final stalled = Completer<void>();
   final stallTimer = Timer.periodic(const Duration(seconds: 20), (_) {
     if (DateTime.now().difference(lastWorkerActivity) >=
-            const Duration(minutes: 10) &&
+            const Duration(minutes: 3) &&
         !stalled.isCompleted) {
       stalled.complete();
     }
@@ -476,7 +467,7 @@ Future<_CaptionProcessResult> _runCaptionProcess(
   if (outcome == -3) {
     return const _CaptionProcessResult(
       -3,
-      'Caption analysis made no progress for 10 minutes and was stopped to keep Windows responsive. Try the tiny model or a shorter edited range.',
+      'Caption analysis made no progress for 3 minutes and was stopped to keep Windows responsive. Try the tiny model or a shorter edited range.',
     );
   }
 
@@ -498,9 +489,12 @@ Future<String> _captionScriptPath() async {
   final separator = Platform.pathSeparator;
   final executableFolder = File(Platform.resolvedExecutable).parent.path;
   final candidates = <String>[
-    '${Directory.current.path}${separator}assets${separator}scripts${separator}ultra_fast_captions.py',
+    '$executableFolder${separator}runtime${separator}captions${separator}ultra_fast_captions.py',
     '$executableFolder${separator}data${separator}flutter_assets${separator}assets${separator}scripts${separator}ultra_fast_captions.py',
     '$executableFolder${separator}assets${separator}scripts${separator}ultra_fast_captions.py',
+    if (!File('$executableFolder${separator}runtime-manifest.json')
+        .existsSync())
+      '${Directory.current.path}${separator}assets${separator}scripts${separator}ultra_fast_captions.py',
   ];
   for (final candidate in candidates) {
     if (await File(candidate).exists()) return File(candidate).absolute.path;
@@ -515,17 +509,22 @@ Future<_PythonCommand> _pythonCommand({
 }) async {
   final configured = Platform.environment['KLIPIO_PYTHON']?.trim();
   final executableFolder = File(Platform.resolvedExecutable).parent.path;
+  final installed =
+      File('$executableFolder/runtime-manifest.json').existsSync();
   final candidates = <_PythonCommand>[
-    if (configured != null && configured.isNotEmpty)
-      _PythonCommand(configured, const []),
     if (Platform.isWindows)
+      _PythonCommand(
+          '$executableFolder/runtime/python/python.exe', const ['-I', '-B']),
+    if (!installed && configured != null && configured.isNotEmpty)
+      _PythonCommand(configured, const []),
+    if (!installed && Platform.isWindows)
       _PythonCommand(
         '$executableFolder${Platform.pathSeparator}python${Platform.pathSeparator}python.exe',
         const [],
       ),
-    if (Platform.isWindows) const _PythonCommand('py', ['-3']),
-    const _PythonCommand('python', []),
-    if (!Platform.isWindows) const _PythonCommand('python3', []),
+    if (!installed && Platform.isWindows) const _PythonCommand('py', ['-3']),
+    if (!installed) const _PythonCommand('python', []),
+    if (!installed && !Platform.isWindows) const _PythonCommand('python3', []),
   ];
 
   for (final candidate in candidates) {
@@ -545,7 +544,6 @@ Future<_PythonCommand> _pythonCommand({
     }
   }
   throw const CaptionGenerationException(
-    'Python 3 was not found. Install Python 3, then run: '
-    'python -m pip install -r tool/requirements-captions.txt',
+    'The automatic-caption component is unavailable. Run Klipio Setup to repair the installation.',
   );
 }

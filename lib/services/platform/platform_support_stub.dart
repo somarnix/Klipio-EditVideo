@@ -52,6 +52,8 @@ Future<List<String>> timelineThumbnailsForVideo(
   double? durationSeconds, {
   double? visibleSourceStart,
   double? visibleSourceEnd,
+  void Function(List<String> frames)? onFrames,
+  bool Function()? isCanceled,
 }) async =>
     const [];
 bool mediaNeedsProxy(MediaProbeInfo info) => false;
@@ -59,5 +61,6 @@ Future<String?> generateProxyMedia(
   String path,
   String cacheFolder, {
   String resolution = '720p',
+  double? durationSeconds,
 }) async =>
     null;

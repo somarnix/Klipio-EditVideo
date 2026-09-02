@@ -2,9 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-import 'package:path_provider/path_provider.dart';
+import '../../core/storage/application_paths.dart';
 
-const klipioCurrentVersion = '2.0.22';
+const klipioCurrentVersion =
+    String.fromEnvironment('KLIPIO_VERSION', defaultValue: 'development');
 
 class KlipioUpdateInfo {
   const KlipioUpdateInfo({
@@ -145,15 +146,13 @@ class KlipioUpdateService {
     // Tell setup exactly which installed copy requested the update. This keeps
     // custom install locations working and lets setup close only this Klipio
     // process before transactionally replacing the old application files.
-    final installDirectory = File(Platform.resolvedExecutable).parent.path;
+    final installDirectory = ApplicationPaths.installRoot.path;
     await Process.start(
       installer.path,
       <String>[
-        '--update',
-        '--install-dir',
-        installDirectory,
-        '--wait-pid',
-        '$pid',
+        '/DIR=$installDirectory',
+        '/NOCLOSEAPPLICATIONS',
+        '/NORESTART',
       ],
       mode: ProcessStartMode.detached,
     );

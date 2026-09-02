@@ -5,7 +5,10 @@ import 'package:video_player/video_player.dart';
 
 import 'preview_controller.dart';
 import 'professional_clip_preview.dart';
+import 'software_effect_frame.dart';
+import '../program_monitor/interactive_transform_overlay.dart';
 import '../../composition/domain/render_scene.dart';
+import '../../composition/domain/video_geometry.dart';
 import '../../timeline/domain/timeline_models.dart';
 
 class MultiTrackPreview extends StatefulWidget {
@@ -22,6 +25,9 @@ class MultiTrackPreview extends StatefulWidget {
     this.selectedClipId,
     this.onClipSelected,
     this.enableTextureEffects = true,
+    this.onTransformChanged,
+    this.onTransformEnd,
+    this.onTransformCancel,
   });
 
   final TimelineModel model;
@@ -35,6 +41,9 @@ class MultiTrackPreview extends StatefulWidget {
   final String? selectedClipId;
   final ValueChanged<String>? onClipSelected;
   final bool enableTextureEffects;
+  final void Function(String clipId, ClipTransform transform)?
+      onTransformChanged;
+  final VoidCallback? onTransformEnd, onTransformCancel;
 
   static List<({TrackModel track, ClipModel clip})> activeVideoLayers({
     required TimelineModel model,
@@ -207,9 +216,10 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
       }
       final sourceSeconds = layer.clip.sourceStart +
           (widget.playheadSeconds - layer.clip.timelineStart) *
-              (widget.playbackSpeedsByMediaPath[layer.clip.mediaPath] ?? 1);
-      final playbackSpeed =
-          widget.playbackSpeedsByMediaPath[layer.clip.mediaPath] ?? 1;
+              layer.clip.resolvedPlaybackSpeed(
+                  widget.playbackSpeedsByMediaPath[layer.clip.mediaPath] ?? 1);
+      final playbackSpeed = layer.clip.resolvedPlaybackSpeed(
+          widget.playbackSpeedsByMediaPath[layer.clip.mediaPath] ?? 1);
       await controller.setPlaybackSpeed(playbackSpeed.clamp(0.25, 4));
       final current = controller.value.position.inMilliseconds / 1000;
       if (!widget.isPlaying || (current - sourceSeconds).abs() > 0.2) {
@@ -290,7 +300,25 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
           ),
           timelineSeconds: widget.playheadSeconds,
         );
+        final transform =
+            clip.transformAt(widget.playheadSeconds - clip.timelineStart);
+        final box = VideoGeometry.resolve(
+          canvasWidth: constraints.maxWidth,
+          canvasHeight: constraints.maxHeight,
+          sourceWidth: controller.value.aspectRatio > 0
+              ? controller.value.aspectRatio
+              : 16 / 9,
+          sourceHeight: 1,
+          scaleX: transform.scaleX,
+          scaleY: transform.scaleY,
+          positionX: transform.positionX,
+          positionY: transform.positionY,
+        );
         Widget video = VideoPlayer(controller);
+        if (!widget.enableTextureEffects &&
+            (clip.effects.any((e) => e.enabled) || clip.transitionIn != null)) {
+          video = SoftwareEffectFrame(clip: clip, time: widget.playheadSeconds);
+        }
         if (widget.enableTextureEffects &&
             (clip.effects.any((effect) => effect.enabled) ||
                 clip.transitionIn != null)) {
@@ -301,9 +329,11 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
           );
         }
         Widget visual = video;
-        final flip = clip.transformAt(
-          widget.playheadSeconds - clip.timelineStart,
-        ).flip;
+        final flip = clip
+            .transformAt(
+              widget.playheadSeconds - clip.timelineStart,
+            )
+            .flip;
         final horizontalFlip =
             flip == 'left' || flip == 'right' || flip == 'up';
         final verticalFlip = flip == 'up' || flip == 'down';
@@ -324,35 +354,42 @@ class _MultiTrackPreviewState extends State<MultiTrackPreview> {
             child: visual,
           );
         }
-        return Positioned(
-          left: node.left,
-          top: node.top,
-          width: node.boxWidth,
-          height: node.boxHeight,
-          child: Transform.rotate(
-            angle: node.rotationDegrees * 0.017453292519943295,
-            child: GestureDetector(
-              onTap: () => widget.onClipSelected?.call(clip.id),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: selected
-                      ? Border.all(color: const Color(0xff22d3ee), width: 2)
-                      : null,
-                ),
-                child: ClipRect(
-                  child: Center(
-                    child: AspectRatio(
-                      aspectRatio: controller.value.aspectRatio > 0
-                          ? controller.value.aspectRatio
-                          : 16 / 9,
-                      child: visual,
-                    ),
+        return Stack(clipBehavior: Clip.none, children: [
+          Positioned(
+            left: box.left,
+            top: box.top,
+            width: box.width,
+            height: box.height,
+            child: Transform.rotate(
+              angle: node.rotationDegrees * 0.017453292519943295,
+              child: GestureDetector(
+                onTap: () => widget.onClipSelected?.call(clip.id),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: selected
+                        ? Border.all(color: const Color(0xff22d3ee), width: 2)
+                        : null,
+                  ),
+                  child: ClipRect(
+                    child: SizedBox.expand(child: visual),
                   ),
                 ),
               ),
             ),
           ),
-        );
+          if (selected &&
+              widget.onTransformChanged != null &&
+              widget.model.clipById(clip.id)?.track.isLocked == false)
+            Positioned.fill(
+                child: InteractiveTransformOverlay(
+              frame: Rect.fromLTWH(box.left, box.top, box.width, box.height),
+              transform: transform,
+              onTransformChanged: (value) =>
+                  widget.onTransformChanged!(clip.id, value),
+              onTransformEnd: widget.onTransformEnd,
+              onTransformCancel: widget.onTransformCancel,
+            )),
+        ]);
       },
     );
   }

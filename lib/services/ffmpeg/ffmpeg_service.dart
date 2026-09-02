@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import '../../core/storage/application_paths.dart';
 
 import '../process/windows_process_job.dart';
 
@@ -27,7 +28,8 @@ class FfmpegService {
     void Function(String line)? onProgressLine,
     Duration timeout = const Duration(minutes: 2),
   }) async {
-    final process = await Process.start(executable, arguments);
+    final process =
+        await Process.start(ApplicationPaths.mediaTool(executable), arguments);
     await registerKlipioWorker(process);
     final stdoutBuffer = _BoundedFfmpegBuffer();
     final stderrBuffer = _BoundedFfmpegBuffer();

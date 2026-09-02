@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:path_provider/path_provider.dart';
+import 'application_paths.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 Future<SharedPreferences>? _preferencesLoad;
@@ -16,6 +16,7 @@ Future<SharedPreferences> loadSharedPreferencesRecovering() {
 }
 
 Future<SharedPreferences> _loadSharedPreferencesRecovering() async {
+  await ApplicationPaths.migrateLegacyPreferences();
   try {
     return await SharedPreferences.getInstance();
   } on FormatException {

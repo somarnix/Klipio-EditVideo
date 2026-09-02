@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../domain/editor_selection.dart';
 
-enum LeftWorkspaceTab { media, text, captions, effects }
+enum LeftWorkspaceTab { media, text, captions, effects, audio }
 
 class ContextAwareInspector extends StatefulWidget {
   const ContextAwareInspector({
@@ -13,6 +13,7 @@ class ContextAwareInspector extends StatefulWidget {
     required this.audioProperties,
     required this.textProperties,
     required this.captionProperties,
+    this.transitionProperties,
   });
 
   final EditorSelection selection;
@@ -21,6 +22,7 @@ class ContextAwareInspector extends StatefulWidget {
   final Widget audioProperties;
   final Widget textProperties;
   final Widget captionProperties;
+  final Widget? transitionProperties;
 
   @override
   State<ContextAwareInspector> createState() => _ContextAwareInspectorState();
@@ -56,6 +58,8 @@ class _ContextAwareInspectorState extends State<ContextAwareInspector> {
       EditorSelectionKind.audioClip => widget.audioProperties,
       EditorSelectionKind.textLayer => widget.textProperties,
       EditorSelectionKind.captionCue => widget.captionProperties,
+      EditorSelectionKind.transition =>
+        widget.transitionProperties ?? widget.videoProperties,
     };
     final label = switch (widget.selection.kind) {
       EditorSelectionKind.none => 'Nothing selected',
@@ -63,6 +67,7 @@ class _ContextAwareInspectorState extends State<ContextAwareInspector> {
       EditorSelectionKind.audioClip => 'Audio',
       EditorSelectionKind.textLayer => 'Text',
       EditorSelectionKind.captionCue => 'Captions',
+      EditorSelectionKind.transition => 'Transition',
     };
     return Column(
       children: [
@@ -95,7 +100,11 @@ class _ContextAwareInspectorState extends State<ContextAwareInspector> {
           ),
         ),
         Expanded(
-            child: _showEdit && _hasSelection ? edit : widget.projectDetails),
+            child: KeyedSubtree(
+                key:
+                    ValueKey('${widget.selection.kind}:${widget.selection.id}'),
+                child:
+                    _showEdit && _hasSelection ? edit : widget.projectDetails)),
       ],
     );
   }

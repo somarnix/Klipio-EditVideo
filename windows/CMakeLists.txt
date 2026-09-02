@@ -43,6 +43,10 @@ function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_options(${TARGET} PRIVATE /EHsc)
   target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
   target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
+  # WIL's Release default embeds absolute __FILE__ paths into error records.
+  # Keep line/address diagnostics without disclosing the build workstation.
+  target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Release>:RESULT_DIAGNOSTICS_LEVEL=2>")
+  target_link_options(${TARGET} PRIVATE "$<$<CONFIG:Release>:/PDBALTPATH:%_PDB%>")
 endfunction()
 
 # Flutter library and tool build rules.

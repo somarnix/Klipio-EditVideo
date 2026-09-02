@@ -1,9 +1,14 @@
 import 'dart:async';
+import '../../text/presentation/caption_paragraph.dart';
 
 import '../../timeline/domain/timeline_models.dart';
 
 class TextOverlaySettings {
   const TextOverlaySettings({
+    this.id = '',
+    this.transform = const ClipTransform(),
+    this.keyframes = const [],
+    this.animationOffset = 0,
     this.text = '',
     this.x = 0.5,
     this.y = 0.75,
@@ -29,6 +34,47 @@ class TextOverlaySettings {
   });
 
   final String text;
+  final String id;
+  final ClipTransform transform;
+  final List<ClipKeyframe> keyframes;
+  final double animationOffset;
+
+  TextOverlaySettings withComposition(
+          {String? id,
+          ClipTransform? transform,
+          List<ClipKeyframe>? keyframes,
+          double? start,
+          double? end,
+          double? animationDuration,
+          double? animationOffset}) =>
+      TextOverlaySettings(
+        id: id ?? this.id,
+        text: text,
+        x: x,
+        y: y,
+        size: size,
+        font: font,
+        color: color,
+        opacity: opacity,
+        stroke: stroke,
+        strokeColor: strokeColor,
+        strokeOpacity: strokeOpacity,
+        shadow: shadow,
+        shadowColor: shadowColor,
+        shadowOpacity: shadowOpacity,
+        animation: animation,
+        animationDuration: animationDuration ?? this.animationDuration,
+        animationOffset: animationOffset ?? this.animationOffset,
+        startX: startX,
+        startY: startY,
+        timelineStart: start ?? timelineStart,
+        timelineEnd: end ?? timelineEnd,
+        visible: visible,
+        tracking: tracking,
+        curve: curve,
+        transform: transform ?? this.transform,
+        keyframes: List.unmodifiable(keyframes ?? this.keyframes),
+      );
   final double x;
   final double y;
   final double size;
@@ -54,6 +100,9 @@ class TextOverlaySettings {
 
 class CaptionWordSettings {
   const CaptionWordSettings({
+    this.id = '',
+    this.rangeStart,
+    this.rangeEnd,
     required this.start,
     required this.end,
     required this.text,
@@ -62,10 +111,13 @@ class CaptionWordSettings {
   final double start;
   final double end;
   final String text;
+  final String id;
+  final int? rangeStart, rangeEnd;
 }
 
 class CaptionCueSettings {
   const CaptionCueSettings({
+    this.id = '',
     required this.start,
     required this.end,
     required this.text,
@@ -77,6 +129,7 @@ class CaptionCueSettings {
   final double start;
   final double end;
   final String text;
+  final String id;
   final List<CaptionWordSettings> words;
   final double x;
   final double y;
@@ -481,6 +534,25 @@ class CaptionAudioSegment {
 }
 
 class MultiTrackExportJob {
+  MultiTrackExportJob withOutputPath(String path) => MultiTrackExportJob(
+        timeline: timeline,
+        outputPath: path,
+        width: width,
+        height: height,
+        frameRate: frameRate,
+        videoBitrateKbps: videoBitrateKbps,
+        exportCodec: exportCodec,
+        backgroundColor: backgroundColor,
+        hardwareEncoding: hardwareEncoding,
+        hardwareDecoding: hardwareDecoding,
+        playbackSpeedsByMediaPath: playbackSpeedsByMediaPath,
+        textOverlays: List.unmodifiable(
+            textOverlays.map((text) => text.withComposition())),
+        captionSettings: captionSettings,
+        captionParagraphSpec: captionParagraphSpec,
+        onProgress: onProgress,
+        cancelToken: cancelToken,
+      );
   const MultiTrackExportJob({
     required this.timeline,
     required this.outputPath,
@@ -495,6 +567,7 @@ class MultiTrackExportJob {
     this.playbackSpeedsByMediaPath = const {},
     this.textOverlays = const [],
     this.captionSettings,
+    this.captionParagraphSpec,
     this.onProgress,
     this.cancelToken,
   });
@@ -512,6 +585,7 @@ class MultiTrackExportJob {
   final Map<String, double> playbackSpeedsByMediaPath;
   final List<TextOverlaySettings> textOverlays;
   final VideoEditSettings? captionSettings;
+  final CaptionParagraphSpec? captionParagraphSpec;
   final void Function(double progress, String status)? onProgress;
   final ExportCancelToken? cancelToken;
 }
@@ -545,7 +619,7 @@ class ExportCancelToken {
   }
 
   Future<void> cancelAndWait({
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 8),
   }) async {
     cancel();
     await waitForIdle().timeout(timeout);

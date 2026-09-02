@@ -354,6 +354,49 @@ void main() {
     expect(find.text('T1'), findsNothing);
   });
 
+  testWidgets(
+      'independent same-source audio does not restore an embedded companion',
+      (tester) async {
+    const model = TimelineModel(duration: 5, tracks: [
+      TrackModel(id: 'v', type: TrackType.video, index: 1, clips: [
+        ClipModel(
+            id: 'video',
+            mediaPath: 'same.mp4',
+            timelineStart: 0,
+            duration: 5,
+            sourceStart: 0,
+            zIndex: 0),
+      ]),
+      TrackModel(id: 'a', type: TrackType.audio, index: 1, clips: [
+        ClipModel(
+            id: 'detached',
+            mediaPath: 'same.mp4',
+            timelineStart: 0,
+            duration: 5,
+            sourceStart: 0,
+            zIndex: 0,
+            isLinkedAudio: false),
+      ]),
+    ]);
+    await tester.pumpWidget(MaterialApp(
+        home: SizedBox(
+            width: 700,
+            height: 250,
+            child: DynamicTimelineView(
+                model: model,
+                pixelsPerSecond: 50,
+                playheadSeconds: 0,
+                mediaWithSourceAudio: const {'same.mp4'},
+                onModelChanged: (_) {},
+                onSeek: (_) {},
+                onClipSelected: (_) {}))));
+    expect(find.byKey(const ValueKey('linked-audio-waveform-video')),
+        findsNothing);
+    expect(find.text('Independent', findRichText: true),
+        findsNothing); // Label also includes duration.
+    expect(find.textContaining('Independent'), findsOneWidget);
+  });
+
   testWidgets('video track exposes separate visibility and source audio mute',
       (tester) async {
     TimelineModel? changed;

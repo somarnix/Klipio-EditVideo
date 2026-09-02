@@ -1,8 +1,11 @@
 import 'dart:io';
+import '../../../core/storage/application_paths.dart';
 import 'package:flutter/material.dart';
 import '../../../core/storage/recovering_shared_preferences.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/localization/klipio_localizations.dart';
+
+enum ProxyMode { off, auto, always }
 
 class AppSettings {
   const AppSettings({
@@ -27,6 +30,7 @@ class AppSettings {
     this.gpuInterface = true,
     this.autoOptimization = 'smart',
     this.proxyEnabled = false,
+    ProxyMode? proxyMode,
     this.proxyFolder = '',
     this.renderCacheFolder = '',
     this.language = 'en',
@@ -34,7 +38,7 @@ class AppSettings {
     this.updateMode = 'notify',
     this.mcpEnabled = false,
     this.mcpPort = 8765,
-  });
+  }) : _proxyMode = proxyMode;
 
   static const _themeKey = 'settings.theme';
   static const _smoothPreviewKey = 'settings.smoothPreview';
@@ -57,6 +61,7 @@ class AppSettings {
   static const _gpuInterfaceKey = 'settings.gpuInterface';
   static const _autoOptimizationKey = 'settings.autoOptimization';
   static const _proxyEnabledKey = 'settings.proxyEnabled';
+  static const _proxyModeKey = 'settings.proxyMode';
   static const _proxyFolderKey = 'settings.proxyFolder';
   static const _renderCacheFolderKey = 'settings.renderCacheFolder';
   static const _languageKey = 'settings.language';
@@ -87,6 +92,19 @@ class AppSettings {
   final bool gpuInterface;
   final String autoOptimization;
   final bool proxyEnabled;
+  final ProxyMode? _proxyMode;
+  // Legacy false must stay OFF, even with the old default smart preference.
+  ProxyMode get proxyMode =>
+      _proxyMode ?? (proxyEnabled ? ProxyMode.always : ProxyMode.off);
+
+  bool shouldGenerateProxy(
+          {required bool demandingMedia, bool projectOverride = false}) =>
+      projectOverride ||
+      switch (proxyMode) {
+        ProxyMode.off => false,
+        ProxyMode.auto => demandingMedia,
+        ProxyMode.always => true,
+      };
   final String proxyFolder;
   final String renderCacheFolder;
   final String language;
@@ -119,6 +137,7 @@ class AppSettings {
     bool? gpuInterface,
     String? autoOptimization,
     bool? proxyEnabled,
+    ProxyMode? proxyMode,
     String? proxyFolder,
     String? renderCacheFolder,
     String? language,
@@ -150,6 +169,12 @@ class AppSettings {
       gpuInterface: gpuInterface ?? this.gpuInterface,
       autoOptimization: autoOptimization ?? this.autoOptimization,
       proxyEnabled: proxyEnabled ?? this.proxyEnabled,
+      proxyMode: proxyMode ??
+          (proxyEnabled == null
+              ? this.proxyMode
+              : proxyEnabled
+                  ? ProxyMode.always
+                  : ProxyMode.off),
       proxyFolder: proxyFolder ?? this.proxyFolder,
       renderCacheFolder: renderCacheFolder ?? this.renderCacheFolder,
       language: language ?? this.language,
@@ -176,10 +201,11 @@ class AppSettings {
         await prefs.setInt(_stabilityMigrationKey, 1);
       }
       if (storedLanguage == null && Platform.isWindows) {
-        final installerLanguage = File(
-          '${File(Platform.resolvedExecutable).parent.path}'
-          '${Platform.pathSeparator}klipio-language.txt',
-        );
+        final migratedLanguage = ApplicationPaths.installerLanguage;
+        final installerLanguage = await migratedLanguage.exists()
+            ? migratedLanguage
+            : File(
+                '${ApplicationPaths.executableDirectory.path}/klipio-language.txt');
         if (await installerLanguage.exists()) {
           storedLanguage = (await installerLanguage.readAsString()).trim();
         }
@@ -213,6 +239,9 @@ class AppSettings {
         gpuInterface: prefs.getBool(_gpuInterfaceKey) ?? true,
         autoOptimization: prefs.getString(_autoOptimizationKey) ?? 'smart',
         proxyEnabled: prefs.getBool(_proxyEnabledKey) ?? false,
+        proxyMode: ProxyMode.values
+            .where((mode) => mode.name == prefs.getString(_proxyModeKey))
+            .firstOrNull,
         proxyFolder: prefs.getString(_proxyFolderKey) ?? '',
         renderCacheFolder: prefs.getString(_renderCacheFolderKey) ?? '',
         language: KlipioLanguages.fromId(storedLanguage ?? 'en').id,
@@ -251,7 +280,8 @@ class AppSettings {
       await prefs.setBool(_hardwareDecodingKey, hardwareDecoding);
       await prefs.setBool(_gpuInterfaceKey, gpuInterface);
       await prefs.setString(_autoOptimizationKey, autoOptimization);
-      await prefs.setBool(_proxyEnabledKey, proxyEnabled);
+      await prefs.setBool(_proxyEnabledKey, proxyMode != ProxyMode.off);
+      await prefs.setString(_proxyModeKey, proxyMode.name);
       await prefs.setString(_proxyFolderKey, proxyFolder);
       await prefs.setString(_renderCacheFolderKey, renderCacheFolder);
       await prefs.setString(_languageKey, language);

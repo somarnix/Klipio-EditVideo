@@ -38,3 +38,15 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+
+# Stable root launcher: system libraries only, with app-local-free static CRT.
+add_executable(KlipioLauncher WIN32 "launcher.cpp" "Runner.rc" "runner.exe.manifest")
+apply_standard_settings(KlipioLauncher)
+set_property(TARGET KlipioLauncher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+target_include_directories(KlipioLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(KlipioLauncher PRIVATE
+  "FLUTTER_VERSION=\"${FLUTTER_VERSION}\""
+  "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}"
+  "FLUTTER_VERSION_MINOR=${FLUTTER_VERSION_MINOR}"
+  "FLUTTER_VERSION_PATCH=${FLUTTER_VERSION_PATCH}"
+  "FLUTTER_VERSION_BUILD=${FLUTTER_VERSION_BUILD}")

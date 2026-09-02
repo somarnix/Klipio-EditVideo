@@ -7,10 +7,6 @@
     <Nullable>enable</Nullable>
     <AssemblyName>KlipioSetup</AssemblyName>
     <RootNamespace>KlipioSetup</RootNamespace>
-    <Version>2.0.22</Version>
-    <AssemblyVersion>2.0.22.0</AssemblyVersion>
-    <FileVersion>2.0.22.0</FileVersion>
-    <KlipioPayload Condition="'$(KlipioPayload)' == ''">..\payload\KlipioApp-v2.0.22-installer-runtime.zip</KlipioPayload>
     <ApplicationIcon>..\..\windows\runner\resources\app_icon.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
@@ -18,6 +14,9 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
+  <Target Name="RetiredInstaller" BeforeTargets="PrepareForBuild">
+    <Error Text="Legacy setup is retired. Run BUILD_FULL_WINDOWS_INSTALLER.bat for the versioned Inno Setup package." />
+  </Target>
 
   <ItemGroup>
     <EmbeddedResource Include="$(KlipioPayload)" LogicalName="KlipioApp.zip" />

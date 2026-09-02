@@ -1,4 +1,11 @@
-enum EditorSelectionKind { none, videoClip, audioClip, textLayer, captionCue }
+enum EditorSelectionKind {
+  none,
+  videoClip,
+  audioClip,
+  textLayer,
+  captionCue,
+  transition
+}
 
 class EditorSelection {
   const EditorSelection.none()
@@ -19,6 +26,11 @@ class EditorSelection {
 
   const EditorSelection.caption(this.id, {this.label = 'Caption Cue'})
       : kind = EditorSelectionKind.captionCue;
+
+  // The incoming clip owns the transition. No second clip-selection authority.
+  const EditorSelection.transition(this.id)
+      : kind = EditorSelectionKind.transition,
+        label = 'Transition';
 
   final EditorSelectionKind kind;
   final String id;

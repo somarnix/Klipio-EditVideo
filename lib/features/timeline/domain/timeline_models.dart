@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'keyframe_curve.dart';
 
 enum TrackType { video, audio, text }
 
@@ -137,14 +138,19 @@ class ClipTransition {
         (item) => item.name == name,
         orElse: () => ClipTransitionType.dissolve,
       ),
-      duration: (double.tryParse('${json['duration'] ?? 0.5}') ?? 0.5)
-          .clamp(0.05, 5)
-          .toDouble(),
+      duration: _validTransitionDuration(json['duration']),
     );
   }
 }
 
+double _validTransitionDuration(Object? raw) {
+  final value = double.tryParse('$raw');
+  return value != null && value.isFinite && value > 0 ? math.min(value, 5) : .5;
+}
+
 class ClipTransform {
+  static const minimumScale = 0.01;
+  static const maximumScale = 20.0;
   const ClipTransform({
     this.opacity = 1,
     this.scaleX = 1,
@@ -172,6 +178,22 @@ class ClipTransform {
   final String canvasColor;
   final String canvasPattern;
   final double canvasBlur;
+
+  /// Shared by numeric controls and canvas handles. Ratio linking clamps the
+  /// common factor, not each axis independently, so it never distorts a clip.
+  ClipTransform withScale(double value,
+      {required bool width, bool uniform = false}) {
+    if (!value.isFinite || value <= 0) return this;
+    if (!uniform) {
+      final bounded = value.clamp(minimumScale, maximumScale).toDouble();
+      return width ? copyWith(scaleX: bounded) : copyWith(scaleY: bounded);
+    }
+    final current = width ? scaleX : scaleY;
+    final lower = math.max(minimumScale / scaleX, minimumScale / scaleY);
+    final upper = math.min(maximumScale / scaleX, maximumScale / scaleY);
+    final factor = (value / current).clamp(lower, upper);
+    return copyWith(scaleX: scaleX * factor, scaleY: scaleY * factor);
+  }
 
   ClipTransform copyWith({
     double? opacity,
@@ -233,8 +255,8 @@ class ClipTransform {
         : '#F4C70F';
     return ClipTransform(
       opacity: number('opacity', 1).clamp(0, 1).toDouble(),
-      scaleX: number('scaleX', 1).clamp(0.01, 20).toDouble(),
-      scaleY: number('scaleY', 1).clamp(0.01, 20).toDouble(),
+      scaleX: number('scaleX', 1).clamp(minimumScale, maximumScale).toDouble(),
+      scaleY: number('scaleY', 1).clamp(minimumScale, maximumScale).toDouble(),
       positionX: number('positionX', 0.5).clamp(0, 1).toDouble(),
       positionY: number('positionY', 0.5).clamp(0, 1).toDouble(),
       rotationDegrees: number('rotationDegrees', 0),
@@ -286,6 +308,7 @@ class ClipModel {
     required this.zIndex,
     this.transform = const ClipTransform(),
     this.volume = 1,
+    this.playbackSpeed,
     this.isMuted = false,
     this.isLinkedAudio = false,
     this.linkedClipId,
@@ -293,6 +316,7 @@ class ClipModel {
     this.effects = const [],
     this.transitionIn,
     this.keyframes = const [],
+    this.textAnimationOffset = 0,
   });
 
   final String id;
@@ -303,6 +327,16 @@ class ClipModel {
   final int zIndex;
   final ClipTransform transform;
   final double volume;
+
+  /// Null only for legacy clips that still need the asset-edit migration.
+  /// Explicit values belong to this clip instance, never its media path.
+  final double? playbackSpeed;
+
+  double resolvedPlaybackSpeed([double legacySpeed = 1]) {
+    final value = playbackSpeed ?? legacySpeed;
+    return (value.isFinite ? value : 1.0).clamp(0.25, 4).toDouble();
+  }
+
   final bool isMuted;
 
   /// Linked source audio is rendered inside its video clip in the timeline.
@@ -319,8 +353,27 @@ class ClipModel {
   final ClipTransition? transitionIn;
   final List<ClipKeyframe> keyframes;
 
+  /// Text's preset clock after trim/split, in unretimed timeline seconds.
+  /// Kept separate from media sourceStart: titles have no source-media clock.
+  final double textAnimationOffset;
+
   double get timelineEnd => timelineStart + duration;
   double get sourceEnd => sourceStart + duration;
+
+  /// Durable source-clock clips and resolved program-clock clips deliberately
+  /// share the serialized model. Convert only at the snapshot/command boundary;
+  /// never divide a resolved program duration a second time in presentation.
+  double programDurationFromSource([double legacySpeed = 1]) =>
+      duration / resolvedPlaybackSpeed(legacySpeed);
+
+  double sourceDurationFromProgram([double legacySpeed = 1]) =>
+      duration * resolvedPlaybackSpeed(legacySpeed);
+
+  /// This clip must come from a resolved program timeline.
+  double sourceTimeAtProgramTime(double seconds, [double legacySpeed = 1]) =>
+      sourceStart +
+      (seconds - timelineStart).clamp(0.0, duration) *
+          resolvedPlaybackSpeed(legacySpeed);
 
   bool get hasProfessionalEdits =>
       effects.any((effect) => effect.enabled) ||
@@ -337,8 +390,7 @@ class ClipModel {
       final right = ordered[index];
       final left = ordered[index - 1];
       if (offset > right.offset) continue;
-      final span = math.max(0.001, right.offset - left.offset);
-      final t = ((offset - left.offset) / span).clamp(0, 1).toDouble();
+      final t = KeyframeCurve.progress(offset, left.offset, right.offset);
       return ClipTransform(
         opacity: _lerp(left.transform.opacity, right.transform.opacity, t),
         scaleX: _lerp(left.transform.scaleX, right.transform.scaleX, t),
@@ -378,6 +430,7 @@ class ClipModel {
     int? zIndex,
     ClipTransform? transform,
     double? volume,
+    double? playbackSpeed,
     bool? isMuted,
     bool? isLinkedAudio,
     String? linkedClipId,
@@ -388,6 +441,7 @@ class ClipModel {
     ClipTransition? transitionIn,
     bool clearTransitionIn = false,
     List<ClipKeyframe>? keyframes,
+    double? textAnimationOffset,
   }) {
     return ClipModel(
       id: id ?? this.id,
@@ -398,6 +452,7 @@ class ClipModel {
       zIndex: zIndex ?? this.zIndex,
       transform: transform ?? this.transform,
       volume: volume ?? this.volume,
+      playbackSpeed: playbackSpeed ?? this.playbackSpeed,
       isMuted: isMuted ?? this.isMuted,
       isLinkedAudio: isLinkedAudio ?? this.isLinkedAudio,
       linkedClipId:
@@ -408,6 +463,7 @@ class ClipModel {
       transitionIn:
           clearTransitionIn ? null : (transitionIn ?? this.transitionIn),
       keyframes: keyframes ?? this.keyframes,
+      textAnimationOffset: textAnimationOffset ?? this.textAnimationOffset,
     );
   }
 
@@ -417,9 +473,12 @@ class ClipModel {
         'timelineStart': timelineStart,
         'duration': duration,
         'sourceStart': sourceStart,
+        if (textAnimationOffset != 0)
+          'textAnimationOffset': textAnimationOffset,
         'zIndex': zIndex,
         'transform': transform.toJson(),
         'volume': volume,
+        if (playbackSpeed != null) 'playbackSpeed': resolvedPlaybackSpeed(),
         'isMuted': isMuted,
         'isLinkedAudio': isLinkedAudio,
         if (linkedClipId != null) 'linkedClipId': linkedClipId,
@@ -439,9 +498,14 @@ class ClipModel {
       timelineStart: math.max(0, number('timelineStart', 0)).toDouble(),
       duration: math.max(0.001, number('duration', 0.001)).toDouble(),
       sourceStart: math.max(0, number('sourceStart', 0)).toDouble(),
+      textAnimationOffset: number('textAnimationOffset', 0).isFinite
+          ? number('textAnimationOffset', 0)
+          : 0,
       zIndex: int.tryParse('${json['zIndex'] ?? 0}') ?? 0,
       transform: ClipTransform.fromJson(json['transform']),
       volume: number('volume', 1).clamp(0, 10).toDouble(),
+      playbackSpeed:
+          json['playbackSpeed'] == null ? null : number('playbackSpeed', 1),
       isMuted: json['isMuted'] as bool? ?? false,
       isLinkedAudio: json['isLinkedAudio'] as bool? ?? false,
       linkedClipId: '${json['linkedClipId'] ?? ''}'.trim().isEmpty
@@ -708,10 +772,17 @@ class TimelineModel {
         const TrackModel(id: 'audio-1', type: TrackType.audio, index: 1),
       );
     }
-    return TimelineModel(
+    final normalized = TimelineModel(
       tracks: tracks,
       duration: calculateDuration(tracks),
     ).normalized();
+    final savedDuration = double.tryParse('${json['duration']}');
+    // Track normalization must not delete explicitly saved trailing canvas.
+    // Invalid or undersized legacy durations still expand to contain all clips.
+    return normalized.copyWith(
+        duration: savedDuration != null && savedDuration.isFinite
+            ? math.max(normalized.duration, savedDuration).toDouble()
+            : normalized.duration);
   }
 }
 

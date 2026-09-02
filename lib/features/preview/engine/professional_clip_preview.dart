@@ -4,6 +4,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../../timeline/domain/timeline_models.dart';
+import '../../composition/domain/effect_render_state.dart';
+import '../../timeline/domain/transition_boundary.dart';
 
 class ProfessionalClipPreview extends StatelessWidget {
   const ProfessionalClipPreview({
@@ -20,14 +22,12 @@ class ProfessionalClipPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Widget result = child;
-    for (final effect in clip.effects.where((item) => item.enabled)) {
+    for (final effect in EffectRenderState.active(clip)) {
       result = _effect(effect, result);
     }
     final transition = clip.transitionIn;
     if (transition == null) return result;
-    final local =
-        (playheadSeconds - clip.timelineStart).clamp(0, clip.duration);
-    final progress = (local / transition.duration).clamp(0, 1).toDouble();
+    final progress = TransitionBoundary.progress(clip, playheadSeconds);
     result = Opacity(opacity: progress, child: result);
     if (transition.type == ClipTransitionType.slideLeft ||
         transition.type == ClipTransitionType.slideRight) {
@@ -164,28 +164,7 @@ class ProfessionalClipPreview extends StatelessWidget {
         ),
       ClipEffectType.sharpen => child,
       ClipEffectType.invert => ColorFiltered(
-          colorFilter: const ColorFilter.matrix([
-            -1,
-            0,
-            0,
-            0,
-            255,
-            0,
-            -1,
-            0,
-            0,
-            255,
-            0,
-            0,
-            -1,
-            0,
-            255,
-            0,
-            0,
-            0,
-            1,
-            0,
-          ]),
+          colorFilter: const ColorFilter.matrix(EffectRenderState.invertMatrix),
           child: child,
         ),
       ClipEffectType.hueRotate => ColorFiltered(

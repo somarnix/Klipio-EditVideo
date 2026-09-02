@@ -1,10 +1,17 @@
 import 'dart:async';
 import 'dart:io';
+import '../../core/storage/application_paths.dart';
 
 import 'package:flutter/services.dart';
+import '../diagnostics/performance_diagnostics.dart';
 
 const MethodChannel _processJobChannel = MethodChannel('klipio/process_job');
 final Map<int, Process> _klipioWorkers = <int, Process>{};
+final Map<int, Map<String, Object?>> _workerDetails = {};
+List<Map<String, Object?>> get klipioWorkerDiagnostics => [
+      for (final entry in _workerDetails.entries)
+        {'pid': entry.key, ...entry.value},
+    ];
 Future<void> _processLogQueue = Future<void>.value();
 
 int get activeKlipioWorkerCount => _klipioWorkers.length;
@@ -13,9 +20,7 @@ void _logWorker(String message) {
   final line = '${DateTime.now().toIso8601String()} $message\r\n';
   _processLogQueue = _processLogQueue.then((_) async {
     try {
-      final directory = Directory(
-        '${Directory.systemTemp.path}${Platform.pathSeparator}KlipioLogs',
-      );
+      final directory = ApplicationPaths.logs;
       await directory.create(recursive: true);
       final file = File(
         '${directory.path}${Platform.pathSeparator}worker-processes.log',
@@ -36,16 +41,38 @@ void _logWorker(String message) {
 ///
 /// Windows closes the job if Klipio exits or crashes, which guarantees that a
 /// registered FFmpeg, FFprobe, or caption worker cannot remain orphaned.
-Future<void> registerKlipioWorker(Process process) async {
+Future<void> registerKlipioWorker(
+  Process process, {
+  String? jobType,
+  String? asset,
+  String? executable,
+}) async {
   _klipioWorkers[process.pid] = process;
+  _workerDetails[process.pid] = {
+    'jobType': jobType,
+    'asset': asset,
+    'executable': executable,
+    'startedAt': DateTime.now().toIso8601String(),
+    'canceling': false,
+  };
   _logWorker('[PROCESS] START PID=${process.pid}');
+  PerformanceDiagnostics.instance.event('FFMPEG_START', {
+    'pid': process.pid,
+    'jobType': jobType,
+    'source': asset,
+    'executable': executable,
+  });
   unawaited(process.exitCode.then<void>(
     (code) {
       _klipioWorkers.remove(process.pid);
+      _workerDetails.remove(process.pid);
       _logWorker('[PROCESS] EXIT PID=${process.pid} CODE=$code');
+      PerformanceDiagnostics.instance
+          .event('FFMPEG_END', {'pid': process.pid, 'exitCode': code});
     },
     onError: (Object error, StackTrace _) {
       _klipioWorkers.remove(process.pid);
+      _workerDetails.remove(process.pid);
       _logWorker('[PROCESS] EXIT PID=${process.pid} ERROR=$error');
     },
   ));
@@ -53,7 +80,12 @@ Future<void> registerKlipioWorker(Process process) async {
   try {
     await _processJobChannel.invokeMethod<void>(
       'registerWorker',
-      <String, Object?>{'pid': process.pid},
+      <String, Object?>{
+        'pid': process.pid,
+        'background': jobType == 'proxy' ||
+            jobType == 'waveform' ||
+            jobType == 'thumbnail'
+      },
     );
   } on MissingPluginException {
     // Unit tests and non-runner embedders do not install the native channel.
@@ -67,6 +99,8 @@ Future<void> registerKlipioWorker(Process process) async {
 /// Terminates one registered worker and its descendants, then waits briefly
 /// for the OS to release the process handle.
 Future<void> terminateKlipioWorker(Process process) async {
+  if (!_klipioWorkers.containsKey(process.pid)) return;
+  _workerDetails[process.pid]?['canceling'] = true;
   _logWorker('[PROCESS] TERMINATE PID=${process.pid}');
   if (Platform.isWindows) {
     try {

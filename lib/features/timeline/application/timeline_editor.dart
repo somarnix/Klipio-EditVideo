@@ -1,5 +1,9 @@
 import 'dart:math' as math;
+import '../domain/transition_boundary.dart';
 
+import '../domain/magnetic_track_resolver.dart';
+import '../domain/linked_audio_edit_guard.dart';
+import '../domain/timeline_boundary.dart';
 import '../domain/timeline_models.dart';
 
 class TimelineSnapResult {
@@ -12,9 +16,29 @@ class TimelineSnapResult {
 }
 
 class TimelineEditor {
-  const TimelineEditor({this.snapThreshold = 0.12});
+  const TimelineEditor({
+    this.snapThreshold = 0.12,
+    this.magneticTrackResolver = const MagneticTrackResolver(),
+  })  : programTime = false,
+        sourceDurations = const {};
+
+  /// Editing the resolved program layout: durations/deltas are program seconds,
+  /// while sourceStart remains media seconds. Durable callers retain the
+  /// existing source-clock constructor.
+  const TimelineEditor.program(
+      {this.snapThreshold = 0.12, this.sourceDurations = const {}})
+      : programTime = true,
+        magneticTrackResolver = const MagneticTrackResolver(programTime: true);
+
+  final bool programTime;
+  final Map<String, double> sourceDurations;
 
   final double snapThreshold;
+  final MagneticTrackResolver magneticTrackResolver;
+
+  bool _linkedAudioTrackLocked(TimelineModel model, String videoId) {
+    return LinkedAudioEditGuard.blocks(model, [videoId]);
+  }
 
   TimelineModel addTrack(TimelineModel model, TrackType type) {
     final existing = model.tracks.where((track) => track.type == type);
@@ -64,6 +88,7 @@ class TimelineEditor {
       return model;
     }
     if (source.track.type != target.type) return model;
+    if (_linkedAudioTrackLocked(model, source.clip.id)) return model;
     final targetStart = snap
         ? snapTime(
             model,
@@ -118,6 +143,61 @@ class TimelineEditor {
     );
   }
 
+  /// One drag transaction, resolved from the starting model. A companion
+  /// selected alongside its video moves once, through that video's ownership.
+  TimelineModel moveClips(
+    TimelineModel model, {
+    required Set<String> clipIds,
+    required String anchorClipId,
+    required String targetTrackId,
+    required double timelineStart,
+    double? playhead,
+    List<double> markers = const [],
+    bool snap = true,
+  }) {
+    final anchor = model.clipById(anchorClipId);
+    final target = model.trackById(targetTrackId);
+    final ids = {...clipIds, anchorClipId};
+    if (anchor == null ||
+        target == null ||
+        target.isLocked ||
+        anchor.track.type != target.type ||
+        ids.any((id) =>
+            model.clipById(id) == null || model.clipById(id)!.track.isLocked) ||
+        LinkedAudioEditGuard.blocks(model, ids)) return model;
+    final companions = <String>{
+      for (final id in ids)
+        if (model.clipById(id)!.track.type == TrackType.video &&
+            model.linkedAudioForVideo(id) != null)
+          model.linkedAudioForVideo(id)!.id,
+    };
+    // A linked-audio anchor is still moved by its selected owner; do not issue
+    // both operations against a progressively mutated timeline.
+    final proposed = snap
+        ? snapTime(model,
+                movingClipId: anchorClipId,
+                proposedStart: timelineStart,
+                clipDuration: anchor.clip.duration,
+                playhead: playhead,
+                markers: markers)
+            .time
+        : timelineStart;
+    final earliest = ids
+        .map((id) => model.clipById(id)!.clip.timelineStart)
+        .reduce(math.min);
+    final delta = math.max(-earliest, proposed - anchor.clip.timelineStart);
+    var next = model;
+    for (final id in ids.where((id) => !companions.contains(id))) {
+      final original = model.clipById(id)!;
+      next = moveClip(next,
+          clipId: id,
+          targetTrackId: id == anchorClipId ? targetTrackId : original.track.id,
+          timelineStart: original.clip.timelineStart + delta,
+          snap: false);
+    }
+    return next;
+  }
+
   TimelineModel splitClip(
     TimelineModel model, {
     required String clipId,
@@ -126,6 +206,8 @@ class TimelineEditor {
     final result = model.clipById(clipId);
     if (result == null || result.track.isLocked) return model;
     final clip = result.clip;
+    if (result.track.type == TrackType.video &&
+        _linkedAudioTrackLocked(model, clip.id)) return model;
     if (playhead <= clip.timelineStart + 0.04 ||
         playhead >= clip.timelineEnd - 0.04) {
       return model;
@@ -136,18 +218,26 @@ class TimelineEditor {
       id: '${clip.id}-a-${(playhead * 1000).round()}',
       duration: firstDuration,
       replacesClipId: clip.replacesClipId ?? clip.id,
-      keyframes: clip.keyframes
-          .where((keyframe) => keyframe.offset <= firstDuration)
-          .toList(),
+      keyframes: result.track.type == TrackType.text
+          ? clip.keyframes
+          : clip.keyframes
+              .where((keyframe) => keyframe.offset <= firstDuration)
+              .toList(),
     );
     final second = clip.copyWith(
       id: '${clip.id}-b-${(playhead * 1000).round()}',
       timelineStart: playhead,
-      sourceStart: clip.sourceStart + firstDuration,
+      sourceStart: clip.sourceStart +
+          firstDuration * (programTime ? clip.resolvedPlaybackSpeed() : 1),
+      textAnimationOffset: result.track.type == TrackType.text
+          ? clip.textAnimationOffset + firstDuration
+          : clip.textAnimationOffset,
       duration: secondDuration,
       replacesClipId: clip.replacesClipId ?? clip.id,
       clearTransitionIn: true,
       keyframes: [
+        if (result.track.type == TrackType.text && clip.keyframes.isNotEmpty)
+          ClipKeyframe(offset: 0, transform: clip.transformAt(firstDuration)),
         for (final keyframe in clip.keyframes)
           if (keyframe.offset >= firstDuration)
             ClipKeyframe(
@@ -184,7 +274,9 @@ class TimelineEditor {
                     item.copyWith(
                       id: 'audio-${second.id}',
                       timelineStart: playhead,
-                      sourceStart: item.sourceStart + firstDuration,
+                      sourceStart: item.sourceStart +
+                          firstDuration *
+                              (programTime ? item.resolvedPlaybackSpeed() : 1),
                       duration: secondDuration,
                       isLinkedAudio: true,
                       linkedClipId: second.id,
@@ -231,6 +323,15 @@ class TimelineEditor {
   TimelineModel deleteClip(TimelineModel model, String clipId) {
     final result = model.clipById(clipId);
     if (result == null || result.track.isLocked) return model;
+    if (result.track.type == TrackType.video &&
+        _linkedAudioTrackLocked(model, clipId)) return model;
+    if (result.track.type == TrackType.video &&
+        result.track.id == model.videoTracks.firstOrNull?.id) {
+      return magneticTrackResolver.rippleDelete(
+        timeline: model,
+        clipId: clipId,
+      );
+    }
     final linkedAudioId = result.track.type == TrackType.video
         ? model.linkedAudioForVideo(result.clip.id)?.id
         : null;
@@ -244,7 +345,8 @@ class TimelineEditor {
           .toList()
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
       for (final clip in remaining) {
-        final start = clip.timelineStart >= result.clip.timelineEnd - 0.001
+        final start = TimelineBoundary.atOrAfter(
+                clip.timelineStart, result.clip.timelineEnd)
             ? math.max(0, clip.timelineStart - result.clip.duration).toDouble()
             : clip.timelineStart;
         shiftedVideoStarts[clip.id] = start;
@@ -298,6 +400,21 @@ class TimelineEditor {
   }) {
     final track = model.trackById(trackId);
     if (track == null || track.isLocked) return model;
+    final primary = model.videoTracks.firstOrNull;
+    if (track.type == TrackType.video && track.id == primary?.id) {
+      final ordered = [...track.clips]..sort(
+          (left, right) => left.timelineStart.compareTo(right.timelineStart));
+      var insertIndex = ordered.indexWhere(
+        (item) =>
+            TimelineBoundary.atOrAfter(item.timelineStart, clip.timelineStart),
+      );
+      if (insertIndex < 0) insertIndex = ordered.length;
+      return magneticTrackResolver.rippleInsert(
+        timeline: model,
+        clip: clip,
+        insertIndex: insertIndex,
+      );
+    }
     return updateTrack(
       model,
       trackId,
@@ -420,12 +537,21 @@ class TimelineEditor {
         result.track.type != TrackType.video) {
       return model;
     }
+    if (_linkedAudioTrackLocked(model, clipId)) return model;
     final ordered = [...result.track.clips]
       ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
     final index = ordered.indexWhere((clip) => clip.id == clipId);
     if (index <= 0) return model;
     final previous = ordered[index - 1];
     final clip = ordered[index];
+    if (_linkedAudioTrackLocked(model, previous.id)) return model;
+    if (transition != null &&
+        (!transition.duration.isFinite ||
+            transition.duration <= 0 ||
+            !TransitionBoundary.joins(previous, clip))) return model;
+    if (transition == null && clip.transitionIn == null) return model;
+    // Only undo a placement change when this is still the original joined pair.
+    final restoreJoin = TransitionBoundary.overlaps(previous, clip);
     final safeTransition = transition == null
         ? null
         : ClipTransition(
@@ -433,13 +559,25 @@ class TimelineEditor {
             duration: math
                 .min(
                   transition.duration,
-                  math.min(previous.duration, clip.duration) * 0.49,
+                  math.min(
+                          previous.duration /
+                              (programTime
+                                  ? 1
+                                  : previous.resolvedPlaybackSpeed()),
+                          clip.duration /
+                              (programTime
+                                  ? 1
+                                  : clip.resolvedPlaybackSpeed())) *
+                      (programTime ? 1 : clip.resolvedPlaybackSpeed()) *
+                      0.49,
                 )
-                .clamp(0.05, 5)
+                .clamp(0, 5)
                 .toDouble(),
           );
+    if (safeTransition?.type == clip.transitionIn?.type &&
+        safeTransition?.duration == clip.transitionIn?.duration) return model;
     final start = safeTransition == null
-        ? previous.timelineEnd
+        ? (restoreJoin ? previous.timelineEnd : clip.timelineStart)
         : previous.timelineEnd - safeTransition.duration;
     final nextStart = math.max(0, start).toDouble();
     final tracks = [
@@ -475,7 +613,7 @@ class TimelineEditor {
         else
           track,
     ];
-    return model.copyWith(tracks: tracks);
+    return model.copyWith(tracks: tracks, duration: model.duration);
   }
 
   TimelineModel setClipKeyframe(
@@ -543,6 +681,33 @@ class TimelineEditor {
   }) {
     final result = model.clipById(clipId);
     if (result == null || result.track.isLocked) return model;
+    if (programTime && result.track.type != TrackType.text) {
+      final clip = result.clip;
+      final speed = clip.resolvedPlaybackSpeed();
+      if (startEdge) {
+        deltaSeconds = math.max(deltaSeconds, -clip.sourceStart / speed);
+      } else {
+        final sourceDuration = sourceDurations[clip.mediaPath];
+        if (sourceDuration != null) {
+          deltaSeconds = math.min(deltaSeconds,
+              (sourceDuration - clip.sourceStart) / speed - clip.duration);
+        }
+      }
+    }
+    if (result.track.type == TrackType.video &&
+        _linkedAudioTrackLocked(model, clipId)) return model;
+    if (result.track.type == TrackType.video &&
+        result.track.id == model.videoTracks.firstOrNull?.id) {
+      final removedSeconds = startEdge ? deltaSeconds : -deltaSeconds;
+      return magneticTrackResolver.rippleTrim(
+        timeline: model,
+        clipId: clipId,
+        deltaDuration: Duration(
+          microseconds: (removedSeconds * 1000000).round(),
+        ),
+        edge: startEdge ? TrimEdge.start : TrimEdge.end,
+      );
+    }
     final clip = result.clip;
     const minimumDuration = 0.15;
     var start = clip.timelineStart;
@@ -552,13 +717,29 @@ class TimelineEditor {
       final delta = deltaSeconds.clamp(-start, duration - minimumDuration);
       start += delta;
       duration -= delta;
-      if (result.track.type != TrackType.text) sourceStart += delta;
+      if (result.track.type != TrackType.text) {
+        sourceStart += delta * (programTime ? clip.resolvedPlaybackSpeed() : 1);
+      }
     } else {
       duration = math.max(minimumDuration, duration + deltaSeconds).toDouble();
     }
     final linkedAudioId = result.track.type == TrackType.video
         ? model.linkedAudioForVideo(clip.id)?.id
         : null;
+    final titleKeyframes = result.track.type == TrackType.text &&
+            startEdge &&
+            clip.keyframes.isNotEmpty
+        ? <ClipKeyframe>[
+            ClipKeyframe(
+                offset: 0,
+                transform: clip.transformAt(start - clip.timelineStart)),
+            for (final frame in clip.keyframes)
+              if (frame.offset > start - clip.timelineStart)
+                ClipKeyframe(
+                    offset: frame.offset - (start - clip.timelineStart),
+                    transform: frame.transform),
+          ]
+        : clip.keyframes;
     return model.copyWith(
       tracks: [
         for (final track in model.tracks)
@@ -571,6 +752,12 @@ class TimelineEditor {
                       timelineStart: start,
                       duration: duration,
                       sourceStart: math.max(0, sourceStart).toDouble(),
+                      keyframes: titleKeyframes,
+                      textAnimationOffset: result.track.type == TrackType.text
+                          ? clip.textAnimationOffset +
+                              start -
+                              clip.timelineStart
+                          : clip.textAnimationOffset,
                     )
                   else
                     item,

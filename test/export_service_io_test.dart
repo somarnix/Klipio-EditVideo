@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/painting.dart';
+import 'package:klipio/features/text/presentation/caption_paragraph.dart';
 
 import 'package:klipio/features/export/domain/export_models.dart';
 import 'package:klipio/features/export/services/export_service.dart';
@@ -8,6 +10,23 @@ import 'package:klipio/features/timeline/domain/timeline_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  test('text preparation failure preserves an existing export', () async {
+    final directory =
+        await Directory.systemTemp.createTemp('klipio-text-failure-');
+    addTearDown(() => directory.delete(recursive: true));
+    final output = File('${directory.path}/existing.mp4');
+    await output.writeAsString('previous valid output');
+    final result = await exportMultiTrackTimeline(MultiTrackExportJob(
+      timeline: const TimelineModel(tracks: [], duration: 1),
+      outputPath: output.path,
+      width: 0,
+      height: 100,
+      textOverlays: const [TextOverlaySettings(text: 'Klipio')],
+    ));
+    expect(result.success, isFalse);
+    expect(await output.readAsString(), 'previous valid output');
+  });
   test('manual captions preserve movable cue position in ASS export', () async {
     final path = await generateManualCaptionAss(
       const ExportJob(
@@ -413,9 +432,49 @@ void main() {
     expect(await File(manualCaptions).length(), greaterThan(0));
 
     final layered = '${temp.path}${Platform.pathSeparator}layered.mp4';
+    final rotated = '${temp.path}${Platform.pathSeparator}rotated.mp4';
+    final rotatedResult = await exportMultiTrackTimeline(MultiTrackExportJob(
+      outputPath: rotated,
+      textOverlays: const [
+        TextOverlaySettings(
+            text: 'Klipio\nសួស្តី',
+            size: 100,
+            timelineStart: 0.1,
+            timelineEnd: 0.4),
+      ],
+      width: 120,
+      height: 160,
+      frameRate: 15,
+      timeline: TimelineModel(tracks: [
+        TrackModel(id: 'v', type: TrackType.video, index: 0, clips: [
+          ClipModel(
+              id: 'rotated',
+              mediaPath: source,
+              timelineStart: 0,
+              sourceStart: 0,
+              duration: 0.5,
+              zIndex: 0,
+              playbackSpeed: 2,
+              transform: const ClipTransform(
+                  rotationDegrees: 27,
+                  scaleX: 1.2,
+                  scaleY: 0.8,
+                  positionX: 0.7,
+                  positionY: 0.3,
+                  opacity: 0.7,
+                  flip: 'down'))
+        ])
+      ], duration: 0.5),
+    ));
+    expect(rotatedResult.success, isTrue, reason: rotatedResult.message);
+    expect(await File(rotated).length(), greaterThan(0));
     final layeredResult = await exportMultiTrackTimeline(
       MultiTrackExportJob(
         outputPath: layered,
+        captionParagraphSpec: const CaptionParagraphSpec(
+            timedHighlight: true,
+            style: TextStyle(
+                fontFamily: 'Arial', fontSize: 72, color: Color(0xFFFFFFFF))),
         width: 320,
         height: 180,
         frameRate: 15,
@@ -442,6 +501,10 @@ void main() {
               start: 0.2,
               end: 0.8,
               text: 'Timeline caption',
+              words: [
+                CaptionWordSettings(start: 0.2, end: 0.5, text: 'Timeline'),
+                CaptionWordSettings(start: 0.5, end: 0.8, text: 'caption')
+              ],
             ),
           ],
         ),

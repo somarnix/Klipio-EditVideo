@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../diagnostics/performance_diagnostics.dart';
 
 enum MediaJobType {
   export,
@@ -6,10 +7,14 @@ enum MediaJobType {
   waveform,
   thumbnail,
   probe,
+  preview,
 }
 
 enum MediaJobPriority {
   critical(0),
+  // Bounded work needed to paint the active editor, not speculative cache work.
+  // It remains eligible during playback; concurrency limits still apply.
+  interactive(5),
   high(10),
   normal(20),
   low(30);
@@ -66,6 +71,9 @@ class MediaJobSnapshot {
     required this.priority,
     required this.state,
     required this.progress,
+    this.asset,
+    this.startedAt,
+    this.cancellationRequested = false,
   });
 
   final String id;
@@ -74,6 +82,9 @@ class MediaJobSnapshot {
   final MediaJobPriority priority;
   final MediaJobState state;
   final double progress;
+  final String? asset;
+  final DateTime? startedAt;
+  final bool cancellationRequested;
 }
 
 class MediaJobHandle<T> {
@@ -104,7 +115,7 @@ typedef MediaJobTask<T> = Future<T> Function(
 /// work immediately and signals running work so its process tree can exit.
 class MediaJobManager {
   MediaJobManager({
-    this.maximumConcurrentJobs = 3,
+    this.maximumConcurrentJobs = 1,
     Map<MediaJobType, int>? concurrencyLimits,
   }) : concurrencyLimits = Map.unmodifiable(
           concurrencyLimits ??
@@ -112,8 +123,9 @@ class MediaJobManager {
                 MediaJobType.export: 1,
                 MediaJobType.proxy: 1,
                 MediaJobType.waveform: 1,
-                MediaJobType.thumbnail: 2,
-                MediaJobType.probe: 2,
+                MediaJobType.thumbnail: 1,
+                MediaJobType.probe: 1,
+                MediaJobType.preview: 1,
               },
         );
 
@@ -125,7 +137,39 @@ class MediaJobManager {
   final Map<String, _QueuedMediaJob> _running = <String, _QueuedMediaJob>{};
   final Map<MediaJobType, int> _runningByType = <MediaJobType, int>{};
   int _sequence = 0;
-  bool _backgroundPaused = false;
+  final Set<String> _foregroundOwners = {};
+  bool _closed = false;
+  final Set<String> _closedScopes = {};
+  int cancellationCount = 0;
+  bool get isBackgroundPaused => _foregroundOwners.isNotEmpty;
+  Set<String> get activeWorkloads => Set.unmodifiable(_foregroundOwners);
+  Map<String, Object?> get diagnostics => {
+        'limit': maximumConcurrentJobs,
+        'workloads': _foregroundOwners.toList(),
+        'running': runningCount,
+        'queued': pendingCount,
+        'cancellations': cancellationCount,
+        'shutdown': _closed,
+        'jobs': [
+          for (final job in jobs)
+            {
+              'id': job.id,
+              'type': job.type.name,
+              'asset': job.asset,
+              'state': job.state.name,
+              'priority': job.priority.name,
+              'progress': job.progress,
+              'startedAt': job.startedAt?.toIso8601String(),
+              'canceling': job.cancellationRequested,
+            }
+        ],
+      };
+
+  void openScope(String scope) => _closedScopes.remove(scope);
+  Future<void> closeScope(String scope) {
+    _closedScopes.add(scope);
+    return cancelScope(scope);
+  }
 
   int get pendingCount => _queue.length;
   int get runningCount => _running.length;
@@ -141,6 +185,8 @@ class MediaJobManager {
     MediaJobPriority priority = MediaJobPriority.normal,
     String scopeId = 'project-media',
     String? id,
+    String? asset,
+    bool interruptible = false,
   }) =>
       scheduleJob<T>(
         type: type,
@@ -148,6 +194,8 @@ class MediaJobManager {
         priority: priority,
         scopeId: scopeId,
         id: id,
+        asset: asset,
+        interruptible: interruptible,
       ).result;
 
   MediaJobHandle<T> scheduleJob<T>({
@@ -156,35 +204,66 @@ class MediaJobManager {
     MediaJobPriority priority = MediaJobPriority.normal,
     String scopeId = 'project-media',
     String? id,
+    String? asset,
+    bool interruptible = false,
   }) {
     final completer = Completer<T>();
-    final resolvedId = id ?? '${type.name}-${++_sequence}';
+    final sequence = ++_sequence;
+    final resolvedId = id ?? '${type.name}-$sequence';
     final job = _QueuedMediaJob(
       id: resolvedId,
       scopeId: scopeId,
       type: type,
       priority: priority,
-      sequence: _sequence,
+      sequence: sequence,
+      asset: asset,
+      interruptible: interruptible,
       completeResult: (value) => completer.complete(value as T),
       completeFailure: completer.completeError,
       isCompleted: () => completer.isCompleted,
       run: (token) async => task(token),
     );
     job.token._progressListener = job.updateProgress;
+    if (_closed || _closedScopes.contains(scopeId)) {
+      job.cancelQueued();
+      return MediaJobHandle<T>._(resolvedId, completer.future, this);
+    }
     _queue.add(job);
+    PerformanceDiagnostics.instance.event('MEDIA_JOB_QUEUED', {
+      'id': resolvedId,
+      'type': type.name,
+      'priority': priority.name,
+      'asset': asset,
+    });
     _sortQueue();
     scheduleMicrotask(_drain);
     return MediaJobHandle<T>._(resolvedId, completer.future, this);
   }
 
-  void pauseBackgroundWork() {
-    _backgroundPaused = true;
+  Future<void> pauseBackgroundWork({String owner = 'background'}) async {
+    _foregroundOwners.add(owner);
+    final interrupted = _running.values
+        .where((job) =>
+            job.interruptible &&
+            job.priority != MediaJobPriority.critical &&
+            job.priority != MediaJobPriority.interactive)
+        .toList();
+    for (final job in interrupted) {
+      if (!job.token.isCanceled) cancellationCount++;
+      job.cancelRunning();
+    }
+    await Future.wait(interrupted.map((job) => job.finished))
+        .timeout(const Duration(seconds: 8), onTimeout: () => <void>[]);
   }
 
-  void resumeBackgroundWork() {
-    if (!_backgroundPaused) return;
-    _backgroundPaused = false;
+  void resumeBackgroundWork({String owner = 'background'}) {
+    if (!_foregroundOwners.remove(owner)) return;
     scheduleMicrotask(_drain);
+  }
+
+  Future<void> shutdown() async {
+    _closed = true;
+    await cancelAll();
   }
 
   Future<void> cancelScope(String scopeId) async {
@@ -217,10 +296,12 @@ class MediaJobManager {
   void _cancelWhere(bool Function(_QueuedMediaJob job) predicate) {
     final queued = _queue.where(predicate).toList();
     for (final job in queued) {
+      cancellationCount++;
       _queue.remove(job);
       job.cancelQueued();
     }
     for (final job in _running.values.where(predicate)) {
+      if (!job.token.isCanceled) cancellationCount++;
       job.cancelRunning();
     }
   }
@@ -239,19 +320,33 @@ class MediaJobManager {
   }
 
   void _drain() {
-    if (_queue.isEmpty || _running.length >= maximumConcurrentJobs) return;
-    while (_running.length < maximumConcurrentJobs) {
+    if (_queue.isEmpty) return;
+    // Interactive work has a reserved lane: it may start alongside one
+    // background job instead of waiting behind a long proxy/waveform task.
+    // This keeps total concurrency bounded at max+1 and never allows two
+    // speculative background workers to compete.
+    bool reservedInteractiveSlot() =>
+        _queue.any((job) => job.priority == MediaJobPriority.interactive) &&
+        _running.values.every((job) =>
+            job.priority != MediaJobPriority.interactive &&
+            job.priority != MediaJobPriority.critical);
+    while (_running.length < maximumConcurrentJobs ||
+        (reservedInteractiveSlot() &&
+            _running.length == maximumConcurrentJobs)) {
       final index = _nextRunnableIndex();
       if (index < 0) return;
       final job = _queue.removeAt(index);
       _start(job);
+      if (job.priority == MediaJobPriority.interactive) break;
     }
   }
 
   int _nextRunnableIndex() {
     for (var index = 0; index < _queue.length; index++) {
       final job = _queue[index];
-      if (_backgroundPaused && job.priority != MediaJobPriority.critical) {
+      if (isBackgroundPaused &&
+          job.priority != MediaJobPriority.critical &&
+          job.priority != MediaJobPriority.interactive) {
         continue;
       }
       final limit = concurrencyLimits[job.type] ?? 1;
@@ -262,6 +357,13 @@ class MediaJobManager {
 
   void _start(_QueuedMediaJob job) {
     job.state = MediaJobState.running;
+    job.startedAt = DateTime.now();
+    PerformanceDiagnostics.instance.event('MEDIA_JOB_START', {
+      'id': job.id,
+      'type': job.type.name,
+      'priority': job.priority.name,
+      'queuedMs': job.startedAt!.difference(job.enqueuedAt).inMilliseconds,
+    });
     _running[job.id] = job;
     _runningByType[job.type] = (_runningByType[job.type] ?? 0) + 1;
     unawaited(() async {
@@ -288,6 +390,11 @@ class MediaJobManager {
           _runningByType[job.type] = remaining;
         }
         job.markFinished();
+        PerformanceDiagnostics.instance.event('MEDIA_JOB_END', {
+          'id': job.id,
+          'type': job.type.name,
+          'state': job.state.name,
+        });
         _drain();
       }
     }());
@@ -305,6 +412,8 @@ class _QueuedMediaJob {
     required this.completeFailure,
     required this.isCompleted,
     required this.run,
+    this.asset,
+    this.interruptible = false,
   });
 
   final String id;
@@ -312,6 +421,10 @@ class _QueuedMediaJob {
   final MediaJobType type;
   final MediaJobPriority priority;
   final int sequence;
+  final DateTime enqueuedAt = DateTime.now();
+  final String? asset;
+  final bool interruptible;
+  DateTime? startedAt;
   final void Function(Object? value) completeResult;
   final void Function(Object error, [StackTrace? stackTrace]) completeFailure;
   final bool Function() isCompleted;
@@ -330,6 +443,9 @@ class _QueuedMediaJob {
         priority: priority,
         state: state,
         progress: progress,
+        asset: asset,
+        startedAt: startedAt,
+        cancellationRequested: token.isCanceled,
       );
 
   void updateProgress(double value) {

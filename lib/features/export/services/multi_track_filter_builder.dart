@@ -2,6 +2,11 @@ import 'dart:math' as math;
 
 import '../domain/export_models.dart';
 import '../../timeline/domain/timeline_models.dart';
+import '../../composition/domain/video_geometry.dart';
+import '../../composition/domain/text_geometry.dart';
+import '../../composition/domain/effect_render_state.dart';
+import '../../timeline/domain/keyframe_curve.dart';
+import '../../timeline/domain/transition_boundary.dart';
 
 class MultiTrackFilterPlan {
   const MultiTrackFilterPlan({
@@ -30,7 +35,15 @@ class MultiTrackFilterBuilder {
     Set<String>? audioClipIdsWithStreams,
     String? captionAssPath,
     bool? hardwareDecoding,
+    Map<String, ({double width, double height})> sourceDimensions = const {},
+    Map<int, String> textRasterPaths = const {},
+    bool titlesStreamed = false,
+    Map<int, String> captionRasterPaths = const {},
+    String? captionStreamUrl,
   }) {
+    if (titlesStreamed && captionStreamUrl == null) {
+      throw StateError('Modern titles require their job-owned visual stream');
+    }
     final timeline = job.timeline;
     final duration = timeline.duration <= 0 ? 0.001 : timeline.duration;
     final videoLayers = <({TrackModel track, ClipModel clip})>[];
@@ -70,7 +83,12 @@ class MultiTrackFilterBuilder {
       captionAssPath: captionAssPath,
       hardwareDecoding: hardwareDecoding ?? job.hardwareDecoding,
     );
-    if (sequentialPlan != null) return sequentialPlan;
+    if (sequentialPlan != null &&
+        textRasterPaths.isEmpty &&
+        captionRasterPaths.isEmpty &&
+        captionStreamUrl == null) {
+      return sequentialPlan;
+    }
 
     final args = <String>[
       '-y',
@@ -129,7 +147,7 @@ class MultiTrackFilterBuilder {
       final prepared = 'video$index';
       final next = 'composite${index + 1}';
       final enable =
-          "between(t,${_n(clip.timelineStart)},${_n(clip.timelineEnd)})";
+          "gte(t,${_n(clip.timelineStart)})*lt(t,${_n(clip.timelineEnd)})";
       var foregroundInput = '$input:v';
       if (transform.canvasMode == 'blur') {
         final foregroundSource = 'video${index}ForegroundSource';
@@ -176,7 +194,9 @@ class MultiTrackFilterBuilder {
       );
       final rotation = rotationDegrees == '0'
           ? ''
-          : ",rotate='$rotationDegrees*PI/180':ow=rotw(iw):oh=roth(ih):c=black@0";
+          : clip.keyframes.isEmpty
+              ? ",rotate='$rotationDegrees*PI/180':ow='ceil(rotw($rotationDegrees*PI/180)/2)*2':oh='ceil(roth($rotationDegrees*PI/180)/2)*2':c=black@0"
+              : ",rotate='$rotationDegrees*PI/180':ow='ceil(hypot(iw,ih)/2)*2':oh=ow:c=black@0";
       final effects = _clipEffectFilters(clip.effects);
       final flip = _flipFilters(transform.flip);
       final incomingFade = clip.transitionIn == null
@@ -188,20 +208,47 @@ class MultiTrackFilterBuilder {
               'd=${_n(outgoing.duration)}:alpha=1'
           : '';
       final needsAlpha = transform.opacity < 0.999 ||
+          clip.keyframes.isNotEmpty ||
           incomingFade.isNotEmpty ||
           outgoingFade.isNotEmpty ||
           rotation.isNotEmpty;
-      final alphaFilters = needsAlpha
-          ? ',format=rgba,colorchannelmixer=aa=${_n(transform.opacity)}'
-          : '';
+      final animatedSize = sourceDimensions[clip.mediaPath];
+      var animationPad = '';
+      if (clip.keyframes.isNotEmpty && animatedSize != null) {
+        final base = VideoGeometry.resolve(
+            canvasWidth: job.width.toDouble(),
+            canvasHeight: job.height.toDouble(),
+            sourceWidth: animatedSize.width,
+            sourceHeight: animatedSize.height,
+            scaleX: 1,
+            scaleY: 1,
+            positionX: 0.5,
+            positionY: 0.5);
+        final maxX = clip.keyframes
+            .map((frame) => frame.transform.scaleX)
+            .reduce(math.max);
+        final maxY = clip.keyframes
+            .map((frame) => frame.transform.scaleY)
+            .reduce(math.max);
+        final width = math.max(2, (base.width * maxX / 2).ceil() * 2);
+        final height = math.max(2, (base.height * maxY / 2).ceil() * 2);
+        // Fixed transparent bounds prevent downstream filters retaining stale
+        // configured dimensions when animated scale changes the input size.
+        animationPad =
+            ',pad=$width:$height:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame';
+      }
+      final alphaFilters = clip.keyframes.isNotEmpty
+          ? ",format=rgba$animationPad,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(${_keyframeExpression(clip, (value) => value.opacity, clock: 'T')})'"
+          : needsAlpha
+              ? ',format=rgba,colorchannelmixer=aa=${_n(transform.opacity)}'
+              : '';
       final scaleFilter = ',${_foregroundScaleFilter(job, clip)}';
       filters.add(
         '[$foregroundInput]trim=start=0:duration=${_n(sourceDuration)},'
         'setpts=(PTS-STARTPTS)/${_n(speed)},'
-        'fps=${_n(job.frameRate)}$flip$effects$rotation'
-        '$alphaFilters'
+        'fps=${_n(job.frameRate)}$flip$effects$scaleFilter$alphaFilters$rotation'
         '$incomingFade$outgoingFade,'
-        'setpts=PTS+${_n(clip.timelineStart)}/TB$scaleFilter[$prepared]',
+        'setpts=PTS+${_n(clip.timelineStart)}/TB[$prepared]',
       );
       final positionX = _keyframeExpression(
         clip,
@@ -219,8 +266,36 @@ class MultiTrackFilterBuilder {
       // Program Monitor stores position as pan across the free space around
       // the fitted/scaled source. Using W*position here moves the center
       // across the entire canvas and produces a different crop on export.
-      var x = '(W-w)/2+(2*($positionX)-1)*abs(W-w)/2';
-      var y = '(H-h)/2+(2*($positionY)-1)*abs(H-h)/2';
+      var x = VideoGeometry.offsetExpression('W', 'w', positionX);
+      var y = VideoGeometry.offsetExpression('H', 'h', positionY);
+      final sourceSize = sourceDimensions[clip.mediaPath];
+      if ((rotation.isNotEmpty || animationPad.isNotEmpty) &&
+          sourceSize != null) {
+        final base = VideoGeometry.resolve(
+            canvasWidth: job.width.toDouble(),
+            canvasHeight: job.height.toDouble(),
+            sourceWidth: sourceSize.width,
+            sourceHeight: sourceSize.height,
+            scaleX: 1,
+            scaleY: 1,
+            positionX: 0.5,
+            positionY: 0.5);
+        // Match the two even-dimension scale stages used by the raster adapter.
+        final width =
+            ((base.width / 2).floor() * 2 * transform.scaleX / 2).floor() * 2;
+        final height =
+            ((base.height / 2).floor() * 2 * transform.scaleY / 2).floor() * 2;
+        final animatedWidth = clip.keyframes.isEmpty
+            ? '$width'
+            : 'max(2\\,trunc(${(base.width / 2).floor() * 2}*(${_keyframeExpression(clip, (value) => value.scaleX, timelineOffset: clip.timelineStart)})/2)*2)';
+        final animatedHeight = clip.keyframes.isEmpty
+            ? '$height'
+            : 'max(2\\,trunc(${(base.height / 2).floor() * 2}*(${_keyframeExpression(clip, (value) => value.scaleY, timelineOffset: clip.timelineStart)})/2)*2)';
+        x = VideoGeometry.rotatedOffsetExpression(
+            'W', 'w', animatedWidth, positionX);
+        y = VideoGeometry.rotatedOffsetExpression(
+            'H', 'h', animatedHeight, positionY);
+      }
       final transition = clip.transitionIn;
       if (transition != null &&
           (transition.type == ClipTransitionType.slideLeft ||
@@ -261,6 +336,7 @@ class MultiTrackFilterBuilder {
       composite = next;
     }
     for (var index = 0; index < job.textOverlays.length; index++) {
+      if (titlesStreamed) break;
       final overlay = job.textOverlays[index];
       if (!overlay.visible || overlay.text.trim().isEmpty) continue;
       final next = 'text${index + 1}';
@@ -268,20 +344,50 @@ class MultiTrackFilterBuilder {
       final end = overlay.timelineEnd > start
           ? overlay.timelineEnd.clamp(start, duration).toDouble()
           : duration;
-      final enable = 'between(t\\,${_n(start)}\\,${_n(end)})';
-      final x = '(w-text_w)*${_n(overlay.x.clamp(0, 1))}';
-      final y = '(h-text_h)*${_n(overlay.y.clamp(0, 1))}';
-      final shadow = overlay.shadow
-          ? ':shadowx=3:shadowy=3:shadowcolor=${_color(overlay.shadowColor)}@${_n(overlay.shadowOpacity.clamp(0, 1))}'
-          : '';
+      final raster = textRasterPaths[index];
+      if (raster != null) {
+        final input = inputIndex++;
+        args.addAll(
+            ['-loop', '1', '-framerate', _n(job.frameRate), '-i', raster]);
+        filters.add('[$composite][$input:v]overlay=x=0:y=0:'
+            "enable='gte(t,${_n(start)})*lt(t,${_n(end)})':"
+            'eof_action=pass:shortest=0:format=auto[$next]');
+        composite = next;
+        continue;
+      }
       filters.add(
-        '[$composite]drawtext=text=\'${_text(overlay.text)}\':'
-        'font=\'${_text(overlay.font)}\':fontsize=${overlay.size.clamp(5, 500).round()}:'
-        'fontcolor=${_color(overlay.color)}@${_n(overlay.opacity.clamp(0, 1))}:'
-        'borderw=${overlay.stroke.clamp(0, 20).round()}:'
-        'bordercolor=${_color(overlay.strokeColor)}@${_n(overlay.strokeOpacity.clamp(0, 1))}'
-        '$shadow:x=\'$x\':y=\'$y\':enable=\'$enable\'[$next]',
+        '[$composite]${_textFilter(overlay, start, end, job.height.toDouble())}[$next]',
       );
+      composite = next;
+    }
+    if (captionStreamUrl != null) {
+      final input = inputIndex++;
+      args.addAll([
+        '-f',
+        'rawvideo',
+        '-pixel_format',
+        'rgba',
+        '-video_size',
+        '${job.width}x${job.height}',
+        '-framerate',
+        _n(job.frameRate),
+        '-i',
+        captionStreamUrl
+      ]);
+      const next = 'captionStream';
+      filters.add(
+          '[$composite][$input:v]overlay=x=0:y=0:eof_action=pass:shortest=0:format=auto[$next]');
+      composite = next;
+    }
+    for (final entry in captionRasterPaths.entries) {
+      final cue = job.captionSettings!.captionCues[entry.key];
+      final input = inputIndex++;
+      args.addAll(
+          ['-loop', '1', '-framerate', _n(job.frameRate), '-i', entry.value]);
+      final next = 'captionRaster${entry.key}';
+      filters.add('[$composite][$input:v]overlay=x=0:y=0:'
+          "enable='gte(t,${_n(cue.start)})*lt(t,${_n(cue.end)})':"
+          'eof_action=pass:shortest=0:format=auto[$next]');
       composite = next;
     }
     if (captionAssPath != null && captionAssPath.trim().isNotEmpty) {
@@ -315,9 +421,13 @@ class MultiTrackFilterBuilder {
       filters.add(
         '[$input:a]atrim=start=0:'
         'duration=${_n(sourceDuration)},asetpts=PTS-STARTPTS,'
-        'atempo=${_n(speed)},atrim=duration=${_n(clip.duration)},'
+        '${_tempoFilter(speed)},atrim=duration=${_n(clip.duration)},'
         'volume=${_n(clip.volume)}$incomingFade$outgoingFade,'
-        'adelay=$delay|$delay[$label]',
+        // adelay may emit leading silence with AV_NOPTS_VALUE when every
+        // mixer input starts after zero (observed with FFmpeg 8.1.2). Those
+        // samples already encode placement; timestamp them from the sample
+        // clock before amix/atrim so the entire mix is not truncated.
+        'adelay=$delay|$delay,asetpts=N/SR/TB[$label]',
       );
       audioLabels.add(label);
     }
@@ -325,6 +435,8 @@ class MultiTrackFilterBuilder {
       filters.add(
         '${audioLabels.map((label) => '[$label]').join()}'
         'amix=inputs=${audioLabels.length}:normalize=0:dropout_transition=0,'
+        // Audio must span the captured canvas, including trailing silence.
+        'apad=whole_dur=${_n(duration)},'
         'atrim=duration=${_n(duration)}[outa]',
       );
     }
@@ -384,18 +496,21 @@ class MultiTrackFilterBuilder {
     var cursor = 0.0;
     for (final clip in clips) {
       final transform = clip.transform;
-      if ((clip.timelineStart - cursor).abs() > 0.002 ||
+      // This is only an optimization. Any gap/overlap, however small, must
+      // retain its timeline placement through the general composition path.
+      if (clip.timelineStart != cursor ||
           clip.transitionIn != null ||
           clip.effects.isNotEmpty ||
           clip.keyframes.isNotEmpty ||
-          transform.rotationDegrees.abs() > 0.001 ||
-          transform.opacity < 0.999 ||
+          transform.rotationDegrees != 0 ||
+          transform.opacity != 1 ||
           transform.blendMode.toLowerCase() != 'normal' ||
           !const {'none', 'blur'}.contains(transform.canvasMode)) {
         return null;
       }
       cursor = clip.timelineEnd;
     }
+    if (cursor != job.timeline.duration) return null;
 
     final matchingAudio = <ClipModel?>[];
     final unusedAudio = <ClipModel>{
@@ -405,9 +520,9 @@ class MultiTrackFilterBuilder {
       ClipModel? match;
       for (final audio in unusedAudio) {
         if (audio.mediaPath == clip.mediaPath &&
-            (audio.timelineStart - clip.timelineStart).abs() <= 0.002 &&
-            (audio.sourceStart - clip.sourceStart).abs() <= 0.002 &&
-            (audio.duration - clip.duration).abs() <= 0.002) {
+            audio.timelineStart == clip.timelineStart &&
+            audio.sourceStart == clip.sourceStart &&
+            audio.duration == clip.duration) {
           match = audio;
           break;
         }
@@ -446,8 +561,10 @@ class MultiTrackFilterBuilder {
       final sourceDuration = _sourceDuration(job, clip);
       final output = 'seqVideo$index';
       final foregroundScale = _foregroundScaleFilter(job, clip);
-      final overlayX = '(W-w)/2+(2*${_n(transform.positionX)}-1)*abs(W-w)/2';
-      final overlayY = '(H-h)/2+(2*${_n(transform.positionY)}-1)*abs(H-h)/2';
+      final overlayX = VideoGeometry.offsetExpression(
+          'W', 'w', _n(transform.positionX.clamp(0, 1)));
+      final overlayY = VideoGeometry.offsetExpression(
+          'H', 'h', _n(transform.positionY.clamp(0, 1)));
       final flip = _flipFilters(transform.flip);
       if (transform.canvasMode == 'blur') {
         final foreground = 'seqForeground$index';
@@ -499,8 +616,12 @@ class MultiTrackFilterBuilder {
         final audioOutput = 'seqAudio$index';
         filters.add(
           '[$index:a]atrim=duration=${_n(audioSourceDuration)},'
-          'asetpts=PTS-STARTPTS,atempo=${_n(audioSpeed)},'
-          'atrim=duration=${_n(audio.duration)},'
+          'asetpts=PTS-STARTPTS,${_tempoFilter(audioSpeed)},'
+          // A finite WSOLA input can end short. Keep its declared slot before
+          // concat so the next clip is not advanced by the missing tail. This
+          // restores placement, not lost source sound; no repeat/extra media.
+          'apad=whole_dur=${_n(audio.duration)},'
+          'atrim=duration=${_n(audio.duration)},asetpts=N/SR/TB,'
           'volume=${_n(audio.volume)}[$audioOutput]',
         );
         audioLabels.add(audioOutput);
@@ -521,12 +642,7 @@ class MultiTrackFilterBuilder {
           ? overlay.timelineEnd.clamp(start, job.timeline.duration)
           : job.timeline.duration;
       filters.add(
-        '[$composite]drawtext=text=\'${_text(overlay.text)}\':'
-        'font=\'${_text(overlay.font)}\':fontsize=${overlay.size.round()}:'
-        'fontcolor=${_color(overlay.color)}:'
-        'borderw=${overlay.stroke.round()}:bordercolor=${_color(overlay.strokeColor)}:'
-        'x=\'(w-text_w)*${_n(overlay.x)}\':y=\'(h-text_h)*${_n(overlay.y)}\':'
-        'enable=\'between(t\\,${_n(start)}\\,${_n(end)})\'[$next]',
+        '[$composite]${_textFilter(overlay, start.toDouble(), end.toDouble(), job.height.toDouble())}[$next]',
       );
       composite = next;
     }
@@ -588,6 +704,23 @@ class MultiTrackFilterBuilder {
     return math.max(2, ((480 * job.width / job.height) / 2).round() * 2);
   }
 
+  String _textFilter(TextOverlaySettings overlay, double start, double end,
+      double canvasHeight) {
+    final scale = TextGeometry.scale(canvasHeight);
+    final enable = 'gte(t\\,${_n(start)})*lt(t\\,${_n(end)})';
+    final x = '(w-text_w)*${_n(overlay.x.clamp(0, 1))}';
+    final y = '(h-text_h)*${_n(overlay.y.clamp(0, 1))}';
+    final shadow = overlay.shadow
+        ? ':shadowx=${_n(3 * scale)}:shadowy=${_n(3 * scale)}:shadowcolor=${_color(overlay.shadowColor)}@${_n(overlay.shadowOpacity.clamp(0, 1))}'
+        : '';
+    return 'drawtext=text=\'${_text(overlay.text)}\':'
+        'font=\'${_text(overlay.font)}\':fontsize=${_n(TextGeometry.fontSize(overlay.size, canvasHeight))}:'
+        'fontcolor=${_color(overlay.color)}@${_n(overlay.opacity.clamp(0, 1))}:'
+        'borderw=${_n(overlay.stroke.clamp(0, 20) * scale)}:'
+        'bordercolor=${_color(overlay.strokeColor)}@${_n(overlay.strokeOpacity.clamp(0, 1))}'
+        '$shadow:x=\'$x\':y=\'$y\':enable=\'$enable\'';
+  }
+
   int _blurHeight(MultiTrackExportJob job) {
     if (job.height >= job.width) return 480;
     return math.max(2, ((480 * job.height / job.width) / 2).round() * 2);
@@ -598,6 +731,13 @@ class MultiTrackFilterBuilder {
     ClipModel clip,
   ) {
     final transform = clip.transform;
+    if (clip.keyframes.isNotEmpty) {
+      final x = _keyframeExpression(clip, (value) => value.scaleX);
+      final y = _keyframeExpression(clip, (value) => value.scaleY);
+      return 'scale=${job.width}:${job.height}:'
+          'force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1,'
+          "scale=w='max(2,trunc(iw*($x)/2)*2)':h='max(2,trunc(ih*($y)/2)*2)':eval=frame:reset_sar=1";
+    }
     // Match _videoTransformRect in Program Monitor exactly: first contain the
     // source in the output frame, then apply independent X/Y scaling. Scaling
     // directly into a composition-relative box loses Scale Y whenever Scale X
@@ -617,7 +757,8 @@ class MultiTrackFilterBuilder {
       };
 
   double _playbackSpeed(MultiTrackExportJob job, ClipModel clip) {
-    final requested = job.playbackSpeedsByMediaPath[clip.mediaPath] ?? 1;
+    final requested = clip.resolvedPlaybackSpeed(
+        job.playbackSpeedsByMediaPath[clip.mediaPath] ?? 1);
     if (!requested.isFinite) return 1;
     return requested.clamp(0.25, 4).toDouble();
   }
@@ -741,7 +882,10 @@ class MultiTrackFilterBuilder {
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
       for (var index = 1; index < clips.length; index++) {
         final transition = clips[index].transitionIn;
-        if (transition != null) result[clips[index - 1].id] = transition;
+        if (transition != null &&
+            TransitionBoundary.joins(clips[index - 1], clips[index])) {
+          result[clips[index - 1].id] = transition;
+        }
       }
     }
     return result;
@@ -816,7 +960,7 @@ class MultiTrackFilterBuilder {
         case ClipEffectType.vignette:
           result.write(',vignette=PI/${_n(12 - amount * 2)}');
         case ClipEffectType.invert:
-          result.write(',negate');
+          result.write(',${EffectRenderState.invertFilter}');
         case ClipEffectType.glitch:
           result
               .write(',rgbashift=rh=${_n(amount * 10)}:bh=${_n(-amount * 10)}');
@@ -831,33 +975,22 @@ class MultiTrackFilterBuilder {
     ClipModel clip,
     double Function(ClipTransform transform) value, {
     double timelineOffset = 0,
+    String clock = 't',
   }) {
     if (clip.keyframes.isEmpty) return _n(value(clip.transform));
-    final keyframes = [...clip.keyframes]
-      ..sort((a, b) => a.offset.compareTo(b.offset));
-    if (keyframes.length == 1) return _n(value(keyframes.first.transform));
-
-    String segment(int index) {
-      final left = keyframes[index];
-      final right = keyframes[index + 1];
-      final leftTime = left.offset + timelineOffset;
-      final rightTime = right.offset + timelineOffset;
-      final leftValue = value(left.transform);
-      final rightValue = value(right.transform);
-      final span = math.max(0.001, rightTime - leftTime);
-      final interpolation = '${_n(leftValue)}+(${_n(rightValue - leftValue)})*'
-          '((t-${_n(leftTime)})/${_n(span)})';
-      final after = index + 1 >= keyframes.length - 1
-          ? _n(rightValue)
-          : segment(index + 1);
-      return 'if(lt(t\\,${_n(leftTime)})\\,${_n(leftValue)}\\,'
-          'if(lt(t\\,${_n(rightTime)})\\,$interpolation\\,$after))';
-    }
-
-    return segment(0);
+    return KeyframeCurve.ffmpeg([
+      for (final frame in clip.keyframes)
+        (time: frame.offset, value: value(frame.transform))
+    ], timelineOffset: timelineOffset, clock: clock);
   }
 
-  String _n(num value) => value.toStringAsFixed(4).replaceFirst(
+  // atempo is not sample-transparent even at 1x: its finite-input tail can
+  // lose samples and turn a split/adjacent boundary into audible silence.
+  // Preserve unchanged-speed PCM in both layered and sequential exports.
+  String _tempoFilter(double speed) =>
+      speed == 1 ? 'anull' : 'atempo=${_n(speed)}';
+
+  String _n(num value) => value.toStringAsFixed(6).replaceFirst(
         RegExp(r'\.?0+$'),
         '',
       );

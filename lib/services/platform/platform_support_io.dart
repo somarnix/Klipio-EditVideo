@@ -1,12 +1,29 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import '../../core/storage/application_paths.dart';
 import 'dart:math' as math;
+import 'package:crypto/crypto.dart';
+import '../tasks/media_worker_policy.dart';
 
 import '../process/windows_process_job.dart';
 import '../tasks/media_job_manager.dart';
 
 final Map<int, Process> _backgroundMediaProcesses = <int, Process>{};
+final Map<String, Future<String?>> _proxyMediaJobs = {};
+final Map<String, Future<void>> _thumbnailBatchJobs = {};
+final Map<String, Future<AudioWaveformLod>> _waveformMediaJobs = {};
+final Map<String, Future<MediaProbeInfo>> _probeJobs = {};
+final Map<String, MediaProbeInfo> _probeCache = {};
+
+Map<String, int> get mediaCacheDiagnostics => {
+      'metadataEntries': _probeCache.length,
+      'metadataJobs': _probeJobs.length,
+      'proxyJobs': _proxyMediaJobs.length,
+      'thumbnailSamplesInFlight': _thumbnailBatchJobs.length,
+      'waveformJobs': _waveformMediaJobs.length,
+      'backgroundProcesses': _backgroundMediaProcesses.length,
+    };
 int _backgroundMediaGeneration = 0;
 
 bool get isAndroid => Platform.isAndroid;
@@ -17,14 +34,7 @@ bool get isDesktop =>
     Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
 String _bundledToolPath(String executableName) {
-  if (!Platform.isWindows) return executableName;
-
-  final appFolder = File(Platform.resolvedExecutable).parent.path;
-  final bundledPath = '$appFolder${Platform.pathSeparator}$executableName.exe';
-  if (File(bundledPath).existsSync()) {
-    return bundledPath;
-  }
-  return executableName;
+  return ApplicationPaths.mediaTool(executableName);
 }
 
 String get _ffmpegExecutable => _bundledToolPath('ffmpeg');
@@ -62,12 +72,17 @@ Future<ProcessResult> _runBackgroundMediaProcess(
   bool binaryStdout = false,
   void Function(List<int> chunk)? onBinaryStdoutChunk,
   Duration idleTimeout = const Duration(minutes: 2),
+  double? progressDuration,
 }) async {
   try {
     return await MediaJobManager.instance.schedule<ProcessResult>(
       type: jobType,
       priority: priority,
       scopeId: 'project-media',
+      asset: arguments.contains('-i')
+          ? arguments[arguments.indexOf('-i') + 1]
+          : null,
+      interruptible: true,
       task: (cancellationToken) => _executeBackgroundMediaProcess(
         executable,
         arguments,
@@ -75,6 +90,8 @@ Future<ProcessResult> _runBackgroundMediaProcess(
         binaryStdout: binaryStdout,
         onBinaryStdoutChunk: onBinaryStdoutChunk,
         idleTimeout: idleTimeout,
+        progressDuration: progressDuration,
+        jobType: jobType,
       ),
     );
   } on MediaJobCanceledException {
@@ -89,13 +106,22 @@ Future<ProcessResult> _executeBackgroundMediaProcess(
   bool binaryStdout = false,
   void Function(List<int> chunk)? onBinaryStdoutChunk,
   Duration idleTimeout = const Duration(minutes: 2),
+  double? progressDuration,
+  required MediaJobType jobType,
 }) async {
   final generation = _backgroundMediaGeneration;
   cancellationToken.throwIfCanceled();
   final process = await Process.start(executable, arguments);
-  await registerKlipioWorker(process);
+  await registerKlipioWorker(process,
+      jobType: jobType.name,
+      executable: executable,
+      asset: arguments.contains('-i')
+          ? arguments[arguments.indexOf('-i') + 1]
+          : null);
   _backgroundMediaProcesses[process.pid] = process;
   var lastActivity = DateTime.now();
+  final progress =
+      arguments.contains('-progress') ? MediaWorkerProgress() : null;
   if (generation != _backgroundMediaGeneration) {
     await _terminateBackgroundProcessTree(process);
   }
@@ -103,7 +129,15 @@ Future<ProcessResult> _executeBackgroundMediaProcess(
   final stderrText = _BoundedBackgroundTextBuffer();
   final binaryBytes = <int>[];
   final stdoutFuture = process.stdout.listen((chunk) {
-    lastActivity = DateTime.now();
+    if (progress == null) {
+      lastActivity = DateTime.now();
+    } else if (progress.add(utf8.decode(chunk, allowMalformed: true))) {
+      lastActivity = DateTime.now();
+      if (progressDuration != null && progressDuration > 0) {
+        cancellationToken.reportProgress(
+            progress.outputMicroseconds / 1000000 / progressDuration);
+      }
+    }
     if (binaryStdout) {
       if (onBinaryStdoutChunk != null) {
         onBinaryStdoutChunk(chunk);
@@ -116,7 +150,7 @@ Future<ProcessResult> _executeBackgroundMediaProcess(
     }
   }).asFuture<void>();
   final stderrFuture = process.stderr.listen((chunk) {
-    lastActivity = DateTime.now();
+    if (progress == null) lastActivity = DateTime.now();
     stderrText.add(systemEncoding.decode(chunk));
   }).asFuture<void>();
   final stalled = Completer<int>();
@@ -134,7 +168,7 @@ Future<ProcessResult> _executeBackgroundMediaProcess(
       stalled.future,
       cancellationToken.whenCanceled.then((_) => -3),
     ]);
-    if (exitCode == -3) {
+    if (exitCode < 0) {
       await _terminateBackgroundProcessTree(process);
     }
     await Future.wait<void>([stdoutFuture, stderrFuture])
@@ -210,6 +244,35 @@ bool _isVideoPath(String path) {
 }
 
 Future<MediaProbeInfo> probeMedia(String path) async {
+  final stat = await File(path).stat();
+  final key =
+      '${File(path).absolute.path}:${stat.size}:${stat.modified.microsecondsSinceEpoch}';
+  final cached = _probeCache.remove(key);
+  if (cached != null) {
+    _probeCache[key] = cached;
+    return cached;
+  }
+  final pending = _probeJobs[key];
+  if (pending != null) return pending;
+  final job = _probeMedia(path);
+  _probeJobs[key] = job;
+  try {
+    final result = await job;
+    if (result.durationSeconds != null) {
+      _probeCache[key] = result;
+      while (_probeCache.length > 128) {
+        _probeCache.remove(_probeCache.keys.first);
+      }
+    }
+    return result;
+  } finally {
+    if (identical(_probeJobs[key], job)) {
+      _probeJobs.remove(key);
+    }
+  }
+}
+
+Future<MediaProbeInfo> _probeMedia(String path) async {
   const fallback = (
     durationSeconds: null,
     width: 0,
@@ -280,23 +343,7 @@ Future<double?> videoDurationSeconds(String path) async {
     return null;
   }
 
-  final result = await _runBackgroundMediaProcess(
-      _ffprobeExecutable,
-      [
-        '-v',
-        'error',
-        '-show_entries',
-        'format=duration',
-        '-of',
-        'default=noprint_wrappers=1:nokey=1',
-        path,
-      ],
-      jobType: MediaJobType.probe,
-      priority: MediaJobPriority.high);
-  if (result.exitCode != 0) {
-    return null;
-  }
-  return double.tryParse('${result.stdout}'.trim());
+  return (await probeMedia(path)).durationSeconds;
 }
 
 Future<bool> videoHasAudio(String path) async {
@@ -341,6 +388,25 @@ Future<AudioWaveformLod> audioWaveformLod(
   String cacheFolder, {
   double? durationSeconds,
 }) async {
+  final key =
+      '${File(path).absolute.path}|${Directory(cacheFolder).absolute.path}|$durationSeconds';
+  final active = _waveformMediaJobs[key];
+  if (active != null) return active;
+  final job = _extractAudioWaveformLod(path, cacheFolder,
+      durationSeconds: durationSeconds);
+  _waveformMediaJobs[key] = job;
+  try {
+    return await job;
+  } finally {
+    if (identical(_waveformMediaJobs[key], job)) {
+      _waveformMediaJobs.remove(key);
+    }
+  }
+}
+
+Future<AudioWaveformLod> _extractAudioWaveformLod(
+    String path, String cacheFolder,
+    {double? durationSeconds}) async {
   if (!isDesktop) {
     return (peaks: const <double>[], peaksPerSecond: 20.0);
   }
@@ -355,12 +421,17 @@ Future<AudioWaveformLod> audioWaveformLod(
       await cacheDirectory.create(recursive: true);
     }
     final duration = durationSeconds ?? await videoDurationSeconds(path) ?? 0;
-    final peaksPerSecond =
+    final requestedRate =
         duration <= 0 ? 20.0 : (60000 / duration).clamp(2.0, 50.0).toDouble();
+    final decodeRate = (requestedRate * 80).round().clamp(400, 4000);
+    final samplesPerPeak = math.max(1, (decodeRate / requestedRate).round());
+    // The envelope clock is determined by integer PCM bins, not the desired
+    // approximate LOD rate. Reporting the latter drifts on long media.
+    final peaksPerSecond = decodeRate / samplesPerPeak;
     final roundedRate = peaksPerSecond.toStringAsFixed(3);
     final safeName = path.hashCode.toString().replaceAll('-', 'n');
     final cachePath =
-        '${cacheDirectory.path}${Platform.pathSeparator}${safeName}_${stat.size}_${stat.modified.millisecondsSinceEpoch}_$roundedRate.waveform-v2';
+        '${cacheDirectory.path}${Platform.pathSeparator}${safeName}_${stat.size}_${stat.modified.millisecondsSinceEpoch}_$roundedRate.waveform-v3';
     final cache = File(cachePath);
     if (await cache.exists()) {
       final bytes = await cache.readAsBytes();
@@ -372,8 +443,6 @@ Future<AudioWaveformLod> audioWaveformLod(
       }
     }
 
-    final decodeRate = (peaksPerSecond * 80).round().clamp(400, 4000);
-    final samplesPerPeak = math.max(1, (decodeRate / peaksPerSecond).round());
     final peaks = <int>[];
     int? lowByte;
     var samplesInPeak = 0;
@@ -406,6 +475,8 @@ Future<AudioWaveformLod> audioWaveformLod(
         'error',
         '-threads',
         '2',
+        '-filter_threads',
+        '1',
         '-i',
         path,
         '-map',
@@ -417,6 +488,8 @@ Future<AudioWaveformLod> audioWaveformLod(
         '$decodeRate',
         '-f',
         's16le',
+        '-threads',
+        '1',
         'pipe:1',
       ],
       binaryStdout: true,
@@ -424,6 +497,7 @@ Future<AudioWaveformLod> audioWaveformLod(
       jobType: MediaJobType.waveform,
       priority: MediaJobPriority.low,
     );
+    if (result.exitCode == -3) throw const MediaJobCanceledException();
     if (result.exitCode != 0) {
       return (peaks: const <double>[], peaksPerSecond: peaksPerSecond);
     }
@@ -444,6 +518,8 @@ Future<AudioWaveformLod> audioWaveformLod(
       peaks: [for (final value in peaks) value / 255.0],
       peaksPerSecond: peaksPerSecond,
     );
+  } on MediaJobCanceledException {
+    rethrow;
   } catch (_) {
     return (peaks: const <double>[], peaksPerSecond: 20.0);
   }
@@ -547,23 +623,36 @@ Future<List<String>> timelineThumbnailsForVideo(
   double? durationSeconds, {
   double? visibleSourceStart,
   double? visibleSourceEnd,
+  void Function(List<String> frames)? onFrames,
+  bool Function()? isCanceled,
 }) async {
   if (!isDesktop || durationSeconds == null || durationSeconds <= 0) {
     return const [];
   }
 
   final cacheDirectory = Directory(cacheFolder);
+  final generation = _backgroundMediaGeneration;
+  bool canceled() =>
+      generation != _backgroundMediaGeneration || (isCanceled?.call() ?? false);
   if (!await cacheDirectory.exists()) {
     await cacheDirectory.create(recursive: true);
   }
-  final safeName = path.hashCode.toString().replaceAll('-', 'n');
+  final sourceStat = await File(path).stat();
+  if (canceled()) return const [];
+  // Derived images belong to this source revision and sampling grid. Never
+  // reuse an old grid after replacing media or correcting its duration.
+  final safeName = '${path.hashCode}_${sourceStat.size}_'
+          '${sourceStat.modified.millisecondsSinceEpoch}_$durationSeconds'
+      .replaceAll('-', 'n');
   final frameCount = (durationSeconds / 5).ceil().clamp(8, 240);
   final paths = [
     for (var index = 0; index < frameCount; index++)
       '${cacheDirectory.path}${Platform.pathSeparator}${safeName}_timeline_${index.toString().padLeft(2, '0')}.jpg',
   ];
   final requestedStart = (visibleSourceStart ?? 0).clamp(0.0, durationSeconds);
-  final requestedEnd = (visibleSourceEnd ?? math.min(durationSeconds, 45.0))
+  // First paint needs an overview of the entire source, not just its first
+  // 45 seconds. Decoding remains capped below; zoomed views refine that grid.
+  final requestedEnd = (visibleSourceEnd ?? durationSeconds)
       .clamp(requestedStart, durationSeconds);
   final buffer = math.max(10.0, (requestedEnd - requestedStart) * 0.15);
   final rangeStart = math.max(0.0, requestedStart - buffer);
@@ -581,10 +670,10 @@ Future<List<String>> timelineThumbnailsForVideo(
           .clamp(0, frameCount - 1),
     ];
   }
-  if (candidateIndices.length > 32) {
+  if (candidateIndices.length > 16) {
     candidateIndices = <int>[
-      for (var sample = 0; sample < 32; sample++)
-        candidateIndices[(sample * (candidateIndices.length - 1) / 31).round()],
+      for (var sample = 0; sample < 16; sample++)
+        candidateIndices[(sample * (candidateIndices.length - 1) / 15).round()],
     ];
   }
   final missing = <int>[];
@@ -592,21 +681,30 @@ Future<List<String>> timelineThumbnailsForVideo(
     final file = File(paths[index]);
     if (!await file.exists() || await file.length() == 0) missing.add(index);
   }
-  if (missing.isEmpty) return paths;
+  List<String> currentFrames() =>
+      _timelineThumbnailGridWithNearestFrames(paths, candidateIndices);
+  void publish() {
+    if (!canceled()) onFrames?.call(currentFrames());
+  }
 
-  // Fast input seeking avoids decoding the full video for every timeline frame.
-  // Two small workers keep imports responsive without saturating the machine
-  // while waveform decoding and video preview are also active.
-  for (var offset = 0; offset < missing.length; offset += 2) {
-    final batch = missing.skip(offset).take(2);
-    await Future.wait([
-      for (final index in batch)
-        _writeTimelineThumbnail(
-          path,
-          paths[index],
-          durationSeconds * (index + 0.5) / frameCount,
+  publish();
+  if (missing.isEmpty) return currentFrames();
+
+  // Fast input seeking avoids decoding the full video. Four timestamp inputs
+  // share one FFmpeg process, which cuts Windows process churn by up to 75%
+  // compared with launching a new worker for every frame.
+  for (var offset = 0; offset < missing.length; offset += 4) {
+    if (canceled()) return const [];
+    final batch = [
+      for (final index in missing.skip(offset).take(4))
+        (
+          outputPath: paths[index],
+          seconds: durationSeconds * (index + 0.5) / frameCount,
         ),
-    ]);
+    ];
+    await _writeTimelineThumbnailBatch(path, batch);
+    if (canceled()) return const [];
+    publish();
   }
   unawaited(
     _trimMediaCache(
@@ -615,62 +713,127 @@ Future<List<String>> timelineThumbnailsForVideo(
       maximumBytes: 256 * 1024 * 1024,
     ),
   );
-  // Preserve the complete time grid without painting broken/blank image
-  // slots. Until a later viewport request renders a missing timestamp, reuse
-  // its nearest decoded frame. The next request still uses the deterministic
-  // real path above and replaces the placeholder automatically.
-  return _timelineThumbnailGridWithNearestFrames(paths);
+  return currentFrames();
 }
 
-List<String> _timelineThumbnailGridWithNearestFrames(List<String> paths) {
+List<String> _timelineThumbnailGridWithNearestFrames(
+    List<String> paths, List<int> requested) {
   final available = <int>[
     for (var index = 0; index < paths.length; index++)
-      if (File(paths[index]).existsSync() && File(paths[index]).lengthSync() > 0)
+      if (File(paths[index]).existsSync() &&
+          File(paths[index]).lengthSync() > 0)
         index,
   ];
-  if (available.isEmpty) return const [];
-  return [
-    for (var index = 0; index < paths.length; index++)
-      if (File(paths[index]).existsSync() && File(paths[index]).lengthSync() > 0)
-        paths[index]
-      else
-        paths[available.reduce(
-          (nearest, candidate) => (candidate - index).abs() <
-                  (nearest - index).abs()
-              ? candidate
-              : nearest,
-        )],
-  ];
+  // Map each slot to its planned temporal sample BEFORE checking readiness.
+  // Mapping to just the available frames repeats the first decoded image
+  // across the whole clip and falsely presents it as other moments in time.
+  final anchors = <int>{...available, ...requested};
+  return List<String>.generate(paths.length, (index) {
+    final nearest = anchors.reduce((nearest, candidate) =>
+        (candidate - index).abs() < (nearest - index).abs()
+            ? candidate
+            : nearest);
+    return available.contains(nearest) ? paths[nearest] : '';
+  });
 }
 
-Future<void> _writeTimelineThumbnail(
+Future<void> _writeTimelineThumbnailBatch(
   String inputPath,
-  String outputPath,
-  double seconds,
+  List<({String outputPath, double seconds})> samples,
 ) async {
-  await _runBackgroundMediaProcess(
-      _ffmpegExecutable,
-      [
-        '-nostdin',
-        '-y',
-        '-loglevel',
-        'error',
+  if (samples.isEmpty) return;
+  final existing = <Future<void>>{
+    for (final sample in samples)
+      if (_thumbnailBatchJobs[sample.outputPath] != null)
+        _thumbnailBatchJobs[sample.outputPath]!,
+  };
+  final missing = samples
+      .where((sample) => !_thumbnailBatchJobs.containsKey(sample.outputPath))
+      .toList();
+  final job = missing.isEmpty
+      ? Future<void>.value()
+      : _writeOwnedThumbnailBatch(inputPath, missing);
+  for (final sample in missing) {
+    _thumbnailBatchJobs[sample.outputPath] = job;
+  }
+  try {
+    await Future.wait([...existing, job]);
+  } finally {
+    for (final sample in missing) {
+      if (identical(_thumbnailBatchJobs[sample.outputPath], job)) {
+        _thumbnailBatchJobs.remove(sample.outputPath);
+      }
+    }
+  }
+}
+
+Future<void> _writeOwnedThumbnailBatch(String inputPath,
+    List<({String outputPath, double seconds})> samples) async {
+  final needed = <({String outputPath, double seconds})>[];
+  for (final sample in samples) {
+    final file = File(sample.outputPath);
+    if (!await file.exists() || await file.length() == 0) needed.add(sample);
+  }
+  if (needed.isEmpty) return;
+  samples = needed;
+  final work =
+      await File(samples.first.outputPath).parent.createTemp('thumbnail-work-');
+  try {
+    final arguments = <String>[
+      '-nostdin',
+      '-y',
+      '-loglevel',
+      'error',
+      '-filter_threads',
+      '1',
+    ];
+    for (final sample in samples) {
+      arguments.addAll([
         '-ss',
-        seconds.toStringAsFixed(3),
+        sample.seconds.toStringAsFixed(3),
         '-threads',
-        '2',
+        '1',
         '-i',
         inputPath,
+      ]);
+    }
+    for (var index = 0; index < samples.length; index++) {
+      arguments.addAll([
+        '-map',
+        '$index:v:0',
         '-frames:v',
         '1',
+        '-an',
         '-vf',
         'scale=160:90:force_original_aspect_ratio=increase,crop=160:90',
         '-q:v',
         '5',
-        outputPath,
-      ],
-      jobType: MediaJobType.thumbnail,
-      priority: MediaJobPriority.low);
+        '-threads:v',
+        '1',
+        '${work.path}${Platform.pathSeparator}$index.jpg',
+      ]);
+    }
+    final result = await _runBackgroundMediaProcess(
+        _ffmpegExecutable, arguments,
+        jobType: MediaJobType.thumbnail,
+        priority: MediaJobPriority.interactive);
+    if (result.exitCode != 0) return;
+    for (var index = 0; index < samples.length; index++) {
+      final image = File('${work.path}${Platform.pathSeparator}$index.jpg');
+      final target = File(samples[index].outputPath);
+      if (await image.exists() &&
+          await image.length() > 0 &&
+          (!await target.exists() || await target.length() == 0)) {
+        await image.rename(target.path);
+      }
+    }
+  } finally {
+    if (await work.exists()) {
+      try {
+        await work.delete(recursive: true);
+      } catch (_) {}
+    }
+  }
 }
 
 bool mediaNeedsProxy(MediaProbeInfo info) {
@@ -681,29 +844,56 @@ bool mediaNeedsProxy(MediaProbeInfo info) {
       info.bitrate > 18 * 1000 * 1000 ||
       codec == 'hevc' ||
       codec == 'h265' ||
-      codec == 'av1' ||
-      (info.durationSeconds ?? 0) >= 20 * 60;
+      codec == 'av1';
 }
 
 Future<String?> generateProxyMedia(
   String path,
   String cacheFolder, {
   String resolution = '720p',
+  double? durationSeconds,
 }) async {
   if (!isDesktop) return null;
+  final source = File(path);
+  if (!await source.exists()) return null;
+  final stat = await source.stat();
+  final height = resolution == '540p' ? 540 : 720;
+  final identity = sha256
+      .convert(utf8.encode(jsonEncode([
+        Platform.isWindows
+            ? source.absolute.path.toLowerCase()
+            : source.absolute.path,
+        stat.size,
+        stat.modified.microsecondsSinceEpoch,
+        MediaWorkerPolicy.proxyProfile,
+        height,
+      ])))
+      .toString();
+  final outputPath =
+      '${Directory(cacheFolder).absolute.path}${Platform.pathSeparator}$identity.mp4';
+  final active = _proxyMediaJobs[outputPath];
+  if (active != null) return active;
+  final job = _generateProxyMedia(path, outputPath, height, durationSeconds);
+  _proxyMediaJobs[outputPath] = job;
   try {
-    final source = File(path);
-    if (!await source.exists()) return null;
-    final stat = await source.stat();
-    final directory = Directory(cacheFolder);
-    await directory.create(recursive: true);
-    final safeName = path.hashCode.toString().replaceAll('-', 'n');
-    final height = resolution == '540p' ? 540 : 720;
-    final outputPath =
-        '${directory.path}${Platform.pathSeparator}${safeName}_${stat.size}_${stat.modified.millisecondsSinceEpoch}_${height}p.mp4';
+    return await job;
+  } finally {
+    if (identical(_proxyMediaJobs[outputPath], job)) {
+      _proxyMediaJobs.remove(outputPath);
+    }
+  }
+}
+
+Future<String?> _generateProxyMedia(
+    String path, String outputPath, int height, double? durationSeconds) async {
+  Directory? work;
+  try {
     final output = File(outputPath);
+    final directory = output.parent;
+    await directory.create(recursive: true);
     if (await output.exists() && await output.length() > 0) return outputPath;
-    final partial = File('$outputPath.partial.mp4');
+    work = await directory.createTemp('proxy-work-');
+    final partial = File('${work.path}${Platform.pathSeparator}output.mp4');
     final result = await _runBackgroundMediaProcess(
       _ffmpegExecutable,
       [
@@ -712,7 +902,12 @@ Future<String?> generateProxyMedia(
         '-v',
         'error',
         '-threads',
-        '2',
+        '${MediaWorkerPolicy.decoderThreads}',
+        '-filter_threads',
+        '${MediaWorkerPolicy.filterThreads}',
+        '-progress',
+        'pipe:1',
+        '-nostats',
         '-i',
         path,
         '-map',
@@ -723,6 +918,10 @@ Future<String?> generateProxyMedia(
         'scale=-2:$height:force_original_aspect_ratio=decrease,fps=30',
         '-c:v',
         'libx264',
+        '-threads:v',
+        '${MediaWorkerPolicy.encoderThreads}',
+        '-x264-params',
+        'threads=${MediaWorkerPolicy.encoderThreads}:lookahead_threads=1',
         '-preset',
         'ultrafast',
         '-crf',
@@ -740,12 +939,14 @@ Future<String?> generateProxyMedia(
       jobType: MediaJobType.proxy,
       priority: MediaJobPriority.low,
       idleTimeout: const Duration(minutes: 5),
+      progressDuration: durationSeconds,
     );
     if (result.exitCode != 0 || !await partial.exists()) {
       if (await partial.exists()) await partial.delete();
       return null;
     }
-    if (await output.exists()) await output.delete();
+    // Another process may have published the same deterministic cache entry.
+    if (await output.exists() && await output.length() > 0) return outputPath;
     await partial.rename(outputPath);
     unawaited(
       _trimMediaCache(
@@ -758,6 +959,13 @@ Future<String?> generateProxyMedia(
     return outputPath;
   } catch (_) {
     return null;
+  } finally {
+    // Only this invocation's unique work directory is ever removed.
+    if (work != null && await work.exists()) {
+      try {
+        await work.delete(recursive: true);
+      } catch (_) {}
+    }
   }
 }
 

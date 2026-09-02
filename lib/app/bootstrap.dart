@@ -1,4 +1,5 @@
 import 'package:flutter/widgets.dart';
+import '../services/diagnostics/performance_diagnostics.dart';
 
 /// Starts Klipio after completing required platform/service initialization.
 ///
@@ -9,6 +10,7 @@ Future<void> bootstrapKlipio({
   Future<void> Function()? initialize,
 }) async {
   WidgetsFlutterBinding.ensureInitialized();
+  await PerformanceDiagnostics.instance.start();
   await initialize?.call();
   runApp(app);
 }
