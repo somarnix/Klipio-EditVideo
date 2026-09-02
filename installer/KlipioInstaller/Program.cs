@@ -9,7 +9,7 @@ namespace KlipioSetup;
 internal static class Program
 {
     private const string AppName = "Klipio";
-    private const string AppVersion = "2.0.21";
+    private const string AppVersion = "2.0.22";
     private const string AppExeName = "Klipio.exe";
 
     [STAThread]
@@ -63,6 +63,7 @@ internal static class Program
         private readonly Button _cancel = new();
         private readonly ComboBox _language = new();
         private readonly CheckBox _accept = new();
+        private readonly ComboBox _installDrive = new();
         private readonly TextBox _folder = new();
         private readonly CheckBox _desktop = new() { Checked = true };
         private readonly CheckBox _startMenu = new() { Checked = true };
@@ -79,6 +80,12 @@ internal static class Program
         private int _page;
         private bool _installing;
         private bool _installed;
+        private bool _syncingInstallLocation;
+
+        private sealed record InstallDriveChoice(string Label, string Folder)
+        {
+            public override string ToString() => Label;
+        }
 
         private static readonly string[] Languages =
         [
@@ -116,6 +123,7 @@ internal static class Program
             Controls.Add(BuildMain());
             Controls.Add(BuildBrand());
             _folder.Text = ResolveInstallFolder(launchOptions.InstallDirectory);
+            SelectInstallDriveForFolder(_folder.Text);
             LoadExistingPreferences();
             if (!launchOptions.IsUpdate && _installedVersion != null)
                 Text = $"Upgrade Klipio {_installedVersion} to {AppVersion}";
@@ -279,6 +287,16 @@ internal static class Program
         {
             var p = Page();
             _folder.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Klipio");
+            _installDrive.DropDownStyle = ComboBoxStyle.DropDownList;
+            _installDrive.Width = 430;
+            PopulateInstallDrives();
+            _installDrive.SelectedIndexChanged += (_, _) =>
+            {
+                if (_syncingInstallLocation || _installDrive.SelectedItem is not InstallDriveChoice choice) return;
+                _syncingInstallLocation = true;
+                _folder.Text = choice.Folder;
+                _syncingInstallLocation = false;
+            };
             _folder.Dock = DockStyle.Fill;
             var browse = new Button { Text = "Browse…", Dock = DockStyle.Right, Width = 100 };
             browse.Click += (_, _) => Browse();
@@ -296,8 +314,15 @@ internal static class Program
             _startup.Visible = false;
             _space.Height = 44;
             _space.ForeColor = Color.FromArgb(71, 85, 105);
-            _folder.TextChanged += (_, _) => Space();
-            AddTop(p, Field("Install location"), row, _space, Gap(10), Field("Shortcuts"),
+            _folder.TextChanged += (_, _) =>
+            {
+                if (!_syncingInstallLocation) SelectInstallDriveForFolder(_folder.Text);
+                Space();
+            };
+            AddTop(p,
+                Paragraph("Choose the drive where the complete Klipio app will remain after setup. The setup EXE can be stored on a different drive."),
+                Field("Install drive"), Wrap(_installDrive), Gap(8),
+                Field("Install folder"), row, _space, Gap(10), Field("Shortcuts"),
                 _desktop, _startMenu, Gap(8),
                 Paragraph("Klipio does not launch automatically when Windows starts. Open it only when you click the app."));
             Space();
@@ -457,16 +482,60 @@ internal static class Program
             if (picker.ShowDialog(this) == DialogResult.OK) _folder.Text = Path.Combine(picker.SelectedPath, "Klipio");
         }
 
+        private void PopulateInstallDrives()
+        {
+            _installDrive.Items.Clear();
+            var systemRoot = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows)) ?? "C:\\";
+            var defaultFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Klipio");
+            foreach (var drive in DriveInfo.GetDrives().Where(item => item.IsReady))
+            {
+                var root = drive.RootDirectory.FullName;
+                var isSystem = string.Equals(root, systemRoot, StringComparison.OrdinalIgnoreCase);
+                var type = drive.DriveType switch
+                {
+                    DriveType.Fixed => "internal drive",
+                    DriveType.Removable => "removable drive",
+                    DriveType.Network => "network drive",
+                    _ => "available drive"
+                };
+                var label = $"{root.TrimEnd(Path.DirectorySeparatorChar)} — {type}{(isSystem ? " (recommended)" : "")}";
+                var folder = isSystem ? defaultFolder : Path.Combine(root, "Klipio App");
+                _installDrive.Items.Add(new InstallDriveChoice(label, folder));
+            }
+            SelectInstallDriveForFolder(_folder.Text);
+        }
+
+        private void SelectInstallDriveForFolder(string folder)
+        {
+            string? root = null;
+            try { root = Path.GetPathRoot(Path.GetFullPath(folder)); }
+            catch { }
+            _syncingInstallLocation = true;
+            _installDrive.SelectedIndex = -1;
+            if (!string.IsNullOrWhiteSpace(root))
+            {
+                for (var index = 0; index < _installDrive.Items.Count; index++)
+                {
+                    if (_installDrive.Items[index] is InstallDriveChoice choice &&
+                        string.Equals(Path.GetPathRoot(choice.Folder), root, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _installDrive.SelectedIndex = index;
+                        break;
+                    }
+                }
+            }
+            _syncingInstallLocation = false;
+        }
+
         private static string ResolveInstallFolder(string? requestedFolder)
         {
             if (!string.IsNullOrWhiteSpace(requestedFolder))
                 return Path.GetFullPath(requestedFolder).TrimEnd(Path.DirectorySeparatorChar);
-
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\Klipio");
-            var registered = key?.GetValue("InstallLocation") as string;
-            if (!string.IsNullOrWhiteSpace(registered))
-                return Path.GetFullPath(registered).TrimEnd(Path.DirectorySeparatorChar);
-
+            // A user-launched full setup always starts at the safe internal
+            // per-user location and shows the drive selector. Never silently
+            // reuse a removable drive from an older installation. Automatic
+            // updates pass --install-dir and therefore stay at their current
+            // explicitly installed location.
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Klipio");
         }
 

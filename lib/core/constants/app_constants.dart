@@ -4,7 +4,7 @@ const String klipioProjectMetaFileName = 'project-meta.json';
 /// Application defaults shared by project creation, preview and export.
 abstract final class AppConstants {
   static const String appName = 'Klipio';
-  static const String currentVersion = '2.0.21';
+  static const String currentVersion = '2.0.22';
   static const int projectSchemaVersion = 2;
   static const double defaultFrameRate = 30;
   static const List<double> supportedFrameRates = [24, 25, 30, 50, 60];

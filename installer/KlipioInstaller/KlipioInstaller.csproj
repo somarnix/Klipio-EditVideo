@@ -7,10 +7,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>KlipioSetup</AssemblyName>
     <RootNamespace>KlipioSetup</RootNamespace>
-    <Version>2.0.21</Version>
-    <AssemblyVersion>2.0.21.0</AssemblyVersion>
-    <FileVersion>2.0.21.0</FileVersion>
-    <KlipioPayload Condition="'$(KlipioPayload)' == ''">..\payload\KlipioApp-v2.0.21-installer-runtime.zip</KlipioPayload>
+    <Version>2.0.22</Version>
+    <AssemblyVersion>2.0.22.0</AssemblyVersion>
+    <FileVersion>2.0.22.0</FileVersion>
+    <KlipioPayload Condition="'$(KlipioPayload)' == ''">..\payload\KlipioApp-v2.0.22-installer-runtime.zip</KlipioPayload>
     <ApplicationIcon>..\..\windows\runner\resources\app_icon.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
